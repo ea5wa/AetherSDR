@@ -10086,7 +10086,6 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
         float maxDbm{0.0f};
         qint64 requestedMs{0};
     };
-    constexpr qint64 kDbmRangePendingTimeoutMs = 2000;
     auto pendingDbm = std::make_shared<PendingDbmRange>();
     auto dbmMatches = [](float leftMin, float leftMax, float rightMin, float rightMax) {
         return std::abs(leftMin - rightMin) < 0.01f
@@ -10175,7 +10174,7 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
                 if (!dbmMatches(minDbm, maxDbm, pendingDbm->minDbm, pendingDbm->maxDbm)) {
                     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
                     if (pendingDbm->requestedMs > 0
-                        && nowMs - pendingDbm->requestedMs > kDbmRangePendingTimeoutMs) {
+                        && nowMs - pendingDbm->requestedMs > kDbmRangeHandshakeTimeoutMs) {
                         pendingDbm->active = false;
                         pendingDbm->requestedMs = 0;
                     } else {
