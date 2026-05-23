@@ -119,7 +119,7 @@ static QString panText(int value)
                                 .arg(std::abs(value - 50));
 }
 
-// ── Style constants (matching docs/applet-style-guide.md) ──────────────────
+// ── Style constants (matching docs/style/applet-style-guide.md) ───────────────
 
 static constexpr const char* kButtonBase =
     "QPushButton { background: #1a2a3a; border: 1px solid #205070; "
