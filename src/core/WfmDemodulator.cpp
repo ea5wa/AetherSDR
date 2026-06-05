@@ -8,12 +8,6 @@
 #include <algorithm>
 #include <cmath>
 
-static void wfmLog(const QString& msg)
-{
-    QFile f("C:/Users/reigc/wfm_debug.txt");
-    if (f.open(QIODevice::Append | QIODevice::Text))
-        QTextStream(&f) << msg << "\n";
-}
 
 namespace AetherSDR {
 
@@ -45,12 +39,9 @@ void WfmDemodulator::start(DaxIqModel* daxIq, const QString& audioDevice,
     const float step = -2.0f * static_cast<float>(M_PI) * freqOffsetHz / IQ_RATE;
     m_corrCosStep = std::cos(step);
     m_corrSinStep = std::sin(step);
-    wfmLog(QString("WfmDemodulator::start device='%1' freqOffsetHz=%2")
-           .arg(audioDevice).arg(freqOffsetHz, 0, 'f', 1));
-
     m_waveOut = new WaveOutWriter(this);
+
     if (!m_waveOut->open(audioDevice, AUDIO_RATE, 2, 16)) {
-        wfmLog("WfmDemodulator: failed to open audio device: " + audioDevice);
         delete m_waveOut;
         m_waveOut = nullptr;
         return;
@@ -67,14 +58,12 @@ void WfmDemodulator::start(DaxIqModel* daxIq, const QString& audioDevice,
         m_usingWaveIn = true;
         connect(m_waveIn, &WaveInReader::pcmReady,
                 this, &WfmDemodulator::onDaxIqPcm);
-        wfmLog(QString("WfmDemodulator: using waveIn path '%1'").arg(m_waveIn->deviceName()));
     } else {
         // Fall back to VITA-49 DaxIqModel path
         delete m_waveIn;
         m_waveIn = nullptr;
         connect(m_daxIq, &DaxIqModel::iqSamplesReady, this, &WfmDemodulator::onIqSamples);
         connect(m_daxIq, &DaxIqModel::streamChanged,   this, &WfmDemodulator::onStreamChanged);
-        wfmLog(QString("WfmDemodulator::start panId='%1' (VITA-49 fallback)").arg(m_panId));
         m_daxIq->createStream(DAX_CHANNEL);
     }
 
@@ -107,15 +96,10 @@ void WfmDemodulator::stop()
 void WfmDemodulator::onStreamChanged(int channel)
 {
     const auto& s = m_daxIq->stream(DAX_CHANNEL);
-    wfmLog(QString("onStreamChanged: ch=%1 panSent=%2 panId='%3' exists=%4 active=%5 streamId=0x%6")
-           .arg(channel).arg(m_panSent).arg(m_panId)
-           .arg(s.exists).arg(s.active)
-           .arg(s.streamId, 0, 16));
     if (channel != DAX_CHANNEL || m_panSent || m_panId.isEmpty()) return;
     if (!s.exists || s.streamId == 0) return;
     const QString cmd = QString("stream set 0x%1 pan=%2")
                         .arg(s.streamId, 0, 16).arg(m_panId);
-    wfmLog(QString("onStreamChanged: sending '%1'").arg(cmd));
     emit commandReady(cmd);
     m_panSent = true;
 }
@@ -211,10 +195,6 @@ void WfmDemodulator::processSamples(const QVector<float>& iqInterleaved)
         }
         iqRms    = std::sqrt(iqRms / numSamples);
         audioRms = std::sqrt(audioRms / numSamples);
-        wfmLog(QString("blk#%1 IQ_rms=%2 audio_rms=%3 audio_max=%4 path=%5")
-               .arg(s_blk).arg(iqRms,0,'f',6)
-               .arg(audioRms,0,'f',4).arg(audioMax,0,'f',4)
-               .arg(m_usingWaveIn ? "waveIn" : "vita49"));
     }
 
     m_waveOut->write(pcm);

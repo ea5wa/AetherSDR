@@ -110,13 +110,6 @@ El código original tenía toda la demodulación dentro de `#ifndef _MSC_VER` (d
 
 ---
 
-## Log de debug
-
-Hay un archivo de log activo en `C:\Users\reigc\wfm_debug.txt` que registra:
-- Apertura/cierre del WaveOutWriter
-- Número de paquetes IQ recibidos (cada 50)
-- Estado del sink
-
 ---
 
 ## Configuración de hs-soundmodem
