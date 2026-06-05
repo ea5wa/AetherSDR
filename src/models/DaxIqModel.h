@@ -5,6 +5,7 @@
 #include <QMap>
 #include <QString>
 #include <QThread>
+#include <QVector>
 
 namespace AetherSDR {
 
@@ -59,6 +60,7 @@ signals:
     void streamChanged(int channel);
     void commandReady(const QString& cmd);
     void iqLevelReady(int channel, float rms);
+    void iqSamplesReady(int channel, QVector<float> iqInterleaved, int sampleRate);
 
 private:
     IqStream m_streams[NUM_CHANNELS];  // index 0-3 for channels 1-4
@@ -89,6 +91,7 @@ public slots:
 
 signals:
     void levelReady(int channel, float rms);
+    void samplesReady(int channel, QVector<float> iqInterleaved, int sampleRate);
 
 private:
     int m_pipeFds[DaxIqModel::NUM_CHANNELS]{-1, -1, -1, -1};

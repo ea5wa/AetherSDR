@@ -133,6 +133,7 @@ signals:
     // Emitted when user selects/deselects RADE digital voice mode
     void radeActivated(bool on, int sliceId);
 #endif
+    void wfmActivated(bool on, int sliceId);
 
 public:
     void setInitialStepSize(int hz);
@@ -209,6 +210,7 @@ private:
     QHBoxLayout* m_freqRow{nullptr};       // frequency display row
     QPushButton* m_txBadge{nullptr};       // TX slice indicator (click to set as TX slice)
     QComboBox*   m_modeCombo{nullptr};     // mode selector (USB, LSB, CW, etc.)
+    QPushButton* m_wfmButton{nullptr};     // WFM software demodulator toggle
     QLabel*      m_freqLabel{nullptr};     // frequency readout e.g. "14.289.510"
     QLineEdit*   m_freqEdit{nullptr};
     QStackedWidget* m_freqStack{nullptr};

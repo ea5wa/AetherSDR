@@ -924,6 +924,15 @@ private:
     void onFdvMetersChanged();
 #endif
 
+    WfmDemodulator* m_wfmDemod{nullptr};
+    int             m_wfmSliceId{-1};
+    bool            m_wfmCooldown{false};
+    int             m_wfmPrevFilterLo{0};
+    int             m_wfmPrevFilterHi{0};
+    QMetaObject::Connection m_wfmFreqConn;
+    void activateWFM(int sliceId);
+    void deactivateWFM();
+
 #if defined(Q_OS_MAC) || defined(HAVE_PIPEWIRE)
     DaxBridge* m_daxBridge{nullptr};
     QString m_savedMicSelection;  // restore on stopDax

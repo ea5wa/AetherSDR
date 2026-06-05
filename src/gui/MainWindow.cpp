@@ -201,6 +201,9 @@
 #include "core/RADEEngine.h"
 #include "RadeApplet.h"
 #endif
+#include "core/WfmDemodulator.h"
+#include "core/PanadapterStream.h"
+#include "gui/WfmDeviceDialog.h"
 #if defined(Q_OS_MAC)
 #include "core/VirtualAudioBridge.h"
 #include <QFileInfo>
@@ -3403,6 +3406,12 @@ MainWindow::MainWindow(QWidget* parent)
         else if (sliceId == m_radeSliceId) deactivateRADE();
     });
 #endif
+
+    connect(m_appletPanel->rxApplet(), &RxApplet::wfmActivated,
+            this, [this](bool on, int sliceId) {
+        if (on) activateWFM(sliceId);
+        else    deactivateWFM();
+    });
 
     // ── Tuning step size ───────────────────────────────────────────────────
     // Two connections, split by source.  stepSizeChanged fires for ANY step
@@ -14740,6 +14749,11 @@ void MainWindow::wireVfoWidget(VfoWidget* w, SliceModel* s)
     });
 #endif
 
+    connect(w, &VfoWidget::wfmActivated, this, [this](bool on, int sliceId) {
+        if (on) activateWFM(sliceId);
+        else    deactivateWFM();
+    });
+
     // AetherDSP button on the per-slice DSP tab — same entry point as the
     // Settings menu action and the RX chain double-click; reuses the
     // existing modeless m_dspDialog when one is already open.
@@ -19057,6 +19071,101 @@ void MainWindow::onSpectrumReadyForSHistory(quint32 streamId, const QVector<floa
             PerfTelemetry::instance().recordSHistorySkipped();
         }
     }
+}
+
+// ─── WFM software demodulator ────────────────────────────────────────────────
+
+void MainWindow::activateWFM(int sliceId)
+{
+    if (m_wfmSliceId == sliceId) return;
+    deactivateWFM();
+
+    m_wfmCooldown = true;
+    QTimer::singleShot(1000, this, [this]{ m_wfmCooldown = false; });
+
+    auto* s = m_radioModel.slice(sliceId);
+    if (!s) return;
+
+    auto resolveAudioDevice = [this]() -> QString {
+        while (true) {
+            QString device = AppSettings::instance()
+                                 .value("WfmAudioDevice").toString().trimmed();
+            if (device.isEmpty()) {
+                WfmDeviceDialog dlg(this);
+                if (dlg.exec() != QDialog::Accepted || dlg.selectedDevice().isEmpty())
+                    return {};
+                device = dlg.selectedDevice();
+                if (dlg.rememberChoice()) {
+                    AppSettings::instance().setValue("WfmAudioDevice", device);
+                    AppSettings::instance().save();
+                }
+            }
+            return device;
+        }
+    };
+
+    const QString audioDevice = resolveAudioDevice();
+    if (audioDevice.isEmpty()) {
+        m_wfmSliceId = -1;
+        return;
+    }
+
+    m_wfmPrevFilterLo = s->filterLow();
+    m_wfmPrevFilterHi = s->filterHigh();
+    s->setFilterWidth(-WfmDemodulator::FILTER_HZ, WfmDemodulator::FILTER_HZ);
+    m_wfmSliceId = sliceId;
+
+    auto centerPanAtSlice = [this, s]() {
+        const QString panId = s->panId();
+        if (panId.isEmpty()) return;
+        const double freq = s->frequency();
+        auto* pan = m_radioModel.panadapter(panId);
+        if (pan && qFuzzyCompare(pan->centerMhz(), freq)) return;
+        const QString freqStr = QString::number(freq, 'f', 6);
+        if (pan) pan->applyPanStatus({{"center", freqStr}});
+        m_radioModel.sendCommand(
+            QString("display pan set %1 center=%2").arg(panId, freqStr));
+    };
+    centerPanAtSlice();
+    m_wfmFreqConn = connect(s, &SliceModel::frequencyChanged,
+                            this, [centerPanAtSlice](double) { centerPanAtSlice(); });
+
+    m_wfmDemod = new WfmDemodulator(this);
+    connect(m_wfmDemod, &WfmDemodulator::commandReady,
+            &m_radioModel, &RadioModel::sendCommand);
+    m_wfmDemod->setVolume(static_cast<int>(s->audioGain()));
+    connect(s, &SliceModel::audioGainChanged,
+            m_wfmDemod, [demod = m_wfmDemod](float g) { demod->setVolume(static_cast<int>(g)); });
+    m_wfmDemod->start(&m_radioModel.daxIqModel(), audioDevice, s->panId(), 0.0f);
+    if (!m_wfmDemod->isActive()) {
+        AppSettings::instance().setValue("WfmAudioDevice", QString());
+        AppSettings::instance().save();
+        delete m_wfmDemod;
+        m_wfmDemod = nullptr;
+        m_wfmSliceId = -1;
+    }
+}
+
+void MainWindow::deactivateWFM()
+{
+    if (m_wfmSliceId < 0) return;
+    if (m_wfmCooldown) return;
+
+    disconnect(m_wfmFreqConn);
+
+    if (m_wfmDemod) {
+        delete m_wfmDemod;
+        m_wfmDemod = nullptr;
+    }
+
+    if (auto* s = m_radioModel.slice(m_wfmSliceId)) {
+        if (m_wfmPrevFilterLo != 0 || m_wfmPrevFilterHi != 0)
+            s->setFilterWidth(m_wfmPrevFilterLo, m_wfmPrevFilterHi);
+    }
+
+    m_wfmSliceId = -1;
+    m_wfmPrevFilterLo = 0;
+    m_wfmPrevFilterHi = 0;
 }
 
 } // namespace AetherSDR
