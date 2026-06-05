@@ -108,6 +108,7 @@ Q_SIGNALS:
 #ifdef HAVE_RADE
     void radeActivated(bool on, int sliceId);
 #endif
+    void wfmActivated(bool on, int sliceId);
     void recordToggled(bool on);
     void playToggled(bool on);
     void aetherDspRequested();     // user clicked the ADSP button on the DSP tab
@@ -330,6 +331,7 @@ private:
     QComboBox* m_modeCombo{nullptr};
     QPushButton* m_quickModeBtns[3]{};
     QString      m_quickModeAssign[3];  // e.g. "USB", "CW", "SSB", "DIG"
+    QPushButton* m_wfmBtn{nullptr};
     void updateQuickModeButtons();
     QGridLayout* m_filterGrid{nullptr};
     QVector<QPushButton*> m_filterBtns;

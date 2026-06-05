@@ -52,6 +52,7 @@ public:
     bool isSystemMoveAreaAt(const QPoint& globalPos) const;
 
 signals:
+    void panFollowToggled(bool on);
     void pcAudioToggled(bool on);
     void masterVolumeChanged(int pct);
     void headphoneVolumeChanged(int pct);
@@ -87,6 +88,7 @@ private:
     QLabel*      m_appNameLabel{nullptr};
     QLabel*      m_otherTxLabel{nullptr};
     QPushButton* m_mfBtn{nullptr};
+    QPushButton* m_panFollowBtn{nullptr};
     QPushButton* m_pcBtn{nullptr};
     QPushButton* m_speakerBtn{nullptr};
     QPushButton* m_headphoneBtn{nullptr};

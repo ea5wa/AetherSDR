@@ -66,6 +66,7 @@ class QMediaDevices;
                                    // onEqCutoffsDragRequested signature.
 #include "gui/PersistentDialog.h" // showOrRaisePersistent template needs
                                    // PersistentDialog visible at point of use.
+#include "core/UlanziDialBackend.h"
 
 namespace AetherSDR {
 
@@ -93,18 +94,12 @@ class Ax25HfPacketDecodeDialog;
 class FlexControlDialog;
 class MidiMappingDialog;
 class UlanziDialMapperDialog;
-#ifdef Q_OS_LINUX
-class EvdevEncoderManager;
-#elif defined(Q_OS_WIN)
-class UlanziDialWindowsManager;
-#elif defined(Q_OS_MAC)
-class UlanziDialMacOSManager;
-#endif
 class CwxPanel;
 class DvkPanel;
 #ifdef HAVE_RADE
 class RADEEngine;
 #endif
+class WfmDemodulator;
 #if defined(Q_OS_MAC)
 class VirtualAudioBridge;
 using DaxBridge = VirtualAudioBridge;
@@ -556,13 +551,7 @@ private:
     QMetaObject::Connection m_sdRitConn;
     QMetaObject::Connection m_sdXitConn;
 #endif
-#ifdef Q_OS_LINUX
-    EvdevEncoderManager*       m_dialBackend{nullptr};
-#elif defined(Q_OS_WIN)
-    UlanziDialWindowsManager*  m_dialBackend{nullptr};
-#elif defined(Q_OS_MAC)
-    UlanziDialMacOSManager*    m_dialBackend{nullptr};
-#endif
+    UlanziDialBackend*         m_dialBackend{nullptr};
     QTimer                     m_dialCoalesceTimer;
     int                        m_dialPendingSteps{0};
 #ifdef HAVE_MIDI
@@ -849,6 +838,19 @@ private:
     void onFdvMeterUpdated(int index, float value);
     void onFdvMetersChanged();
 #endif
+
+    WfmDemodulator* m_wfmDemod{nullptr};
+    int             m_wfmSliceId{-1};
+    bool            m_wfmCooldown{false};
+    int             m_wfmPrevFilterLo{0};
+    int             m_wfmPrevFilterHi{0};
+    QMetaObject::Connection m_wfmFreqConn;
+    void activateWFM(int sliceId);
+    void deactivateWFM();
+
+    // Pan Follow — keeps the panadapter centered on Slice A frequency
+    QMetaObject::Connection m_panFollowConn;
+    void setPanFollow(bool on);
 
 #if defined(Q_OS_MAC) || defined(HAVE_PIPEWIRE)
     DaxBridge* m_daxBridge{nullptr};

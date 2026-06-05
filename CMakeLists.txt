@@ -573,6 +573,9 @@ set(CORE_SOURCES
     src/core/SleepInhibitor.cpp
     src/core/MemoryCsvCompat.cpp
     src/core/MemoryRecallPolicy.cpp
+    src/core/WfmDemodulator.cpp
+    src/core/WaveOutWriter.cpp
+    src/core/WaveInReader.cpp
     src/core/tnc/AetherAx25LibmodemShim.cpp
     src/core/tnc/Ax25FrameFormatter.cpp
 )
@@ -622,6 +625,7 @@ set(MODEL_SOURCES
 set(GUI_SOURCES
     src/gui/MainWindow.cpp
     src/gui/AudioDeviceChangeDialog.cpp
+    src/gui/WfmDeviceDialog.cpp
     src/gui/ConnectionPanel.cpp
     src/gui/ClientDisconnectDialog.cpp
     src/gui/ConnectedStationsDialog.cpp

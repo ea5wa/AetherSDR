@@ -1,0 +1,133 @@
+# Resumen del proyecto: Modo WFM en AetherSDR
+
+---
+
+## Objetivo
+
+Añadir un modo **WFM (Wide FM) funcional** en el software **AetherSDR** (SDR para FlexRadio 6600) que:
+
+1. Se active con el botón WFM ya existente en la UI
+2. Desmodule FM por software desde el stream DAX IQ del radio (canal 1, 48kHz)
+3. Envíe el audio desmodulado al cable virtual **Hi-Fi Cable Input (VB-Audio)** con **hasta 20kHz de ancho de banda de audio**
+4. Permita que **hs-soundmodem (UZ7HO)** decodifique señales G3RUH 9600 baud de satélites, leyendo desde **Hi-Fi Cable Output**
+
+---
+
+## Estado actual al dejar el trabajo
+
+- El botón WFM activa el demodulador ✅
+- Los paquetes IQ llegan continuamente (confirmado: 2800+ paquetes) ✅
+- El audio llega a hs-soundmodem ✅
+- El ancho de banda es correcto (1000–18000 Hz en waterfall) ✅
+- **Problema pendiente**: el waterfall de hs-soundmodem muestra líneas horizontales con huecos negros periódicos (audio entrecortado), mientras que en modo FM el waterfall es continuo y denso
+
+---
+
+## Arquitectura del código
+
+**Archivos creados/modificados:**
+
+| Archivo | Descripción |
+|---|---|
+| `src/core/WfmDemodulator.h/.cpp` | Demodulador FM por software (discriminador atan2) |
+| `src/core/WaveOutWriter.h/.cpp` | Salida de audio vía Windows waveOut API |
+| `src/gui/MainWindow.h/.cpp` | Cooldown anti-feedback y llamadas a WFM |
+| `CMakeLists.txt` | Añadido `WaveOutWriter.cpp` a las fuentes |
+
+**Flujo de señal:**
+```
+FlexRadio → DAX IQ UDP (VITA-49) → DaxIqModel → iqSamplesReady signal
+→ WfmDemodulator::onIqSamples() → discriminador FM atan2
+→ WaveOutWriter::write() → waveOut API Windows
+→ Hi-Fi Cable Input (VB-Audio) → Hi-Fi Cable Output → hs-soundmodem
+```
+
+**Parámetros del demodulador:**
+- `DAX_CHANNEL = 1`, `IQ_RATE = 48000 Hz`, `AUDIO_RATE = 48000 Hz`
+- `FILTER_HZ = ±20000 Hz` (filtro del slice en el radio)
+- `GAIN = 3.0` (ganancia discriminador, ~60% full scale para G3RUH ±4.8kHz desviación)
+- Sin de-énfasis (señales digitales de satélite no están pre-enfatizadas)
+
+**Discriminador FM (atan2):**
+```cpp
+float cross = I * prevQ - Q * prevI;
+float dot   = I * prevI + Q * prevQ;
+float audio = std::atan2(cross, dot) * (GAIN / M_PI);
+```
+
+---
+
+## Problema raíz inicial
+
+El código original tenía toda la demodulación dentro de `#ifndef _MSC_VER` (dependía de liquid-dsp, incompatible con Windows/MSVC). En Windows el botón WFM activaba el sink de audio pero no desmodulaba nada.
+
+---
+
+## Todo lo que se intentó para los cortes de audio
+
+### Intento 1: QAudioSink push mode directo
+- Escritura directa de PCM al sink desde `onIqSamples()`
+- **Problema**: El sink entra en `IdleState` (sinkState=3) entre paquetes IQ. WASAPI en modo compartido tiene latencia ~10ms igual que el intervalo entre paquetes → cero margen → cortes
+
+### Intento 2: QAudioSink push mode con buffer grande (500ms)
+- Buffer de 500ms + pre-llenado de silencio
+- **Resultado**: sinkState=0 (Active) ✅, `free` estable ✅, pero los cortes persistían
+- **Conclusión**: El pipeline Qt funcionaba correctamente; el problema estaba en otro lugar
+
+### Intento 3: QAudioSink pull mode con ring buffer
+- `WfmAudioBuffer` (QIODevice custom) + `QAudioSink::start(device)` en modo pull
+- `isSequential()`, `bytesAvailable()` override
+- **Problema**: Qt6 en Windows no consume datos del dispositivo custom en pull mode — `bytesFree()` siempre retornaba el máximo, el sink no llamaba `readData()`
+
+### Intento 4: Ring buffer + QTimer cada 10ms (push)
+- Timer pusha datos del ring al sink cada 10ms
+- **Problema**: Precisión real del timer de Windows es ~15ms → huecos de 5ms entre escrituras → cortes
+
+### Intento 5: waveOut API de Windows directamente
+- `WaveOutWriter` con `waveOutWrite()` y doble buffer (8 WAVEHDRs)
+- Sin dependencia de Qt audio
+- **Problema**: Spin-loop `Sleep(1)` bloqueaba el hilo Qt (event loop) → los paquetes IQ se acumulaban en cola → ráfagas → patrón entrecortado
+
+### Intento 6: waveOut con pre-llenado de silencio (16 buffers × 10ms)
+- Pre-encolar 16 buffers con silencio al inicio → 160ms de colchón
+- Cada paquete IQ reemplaza el buffer más antiguo
+- **Problema descubierto (comparando waterfalls FM vs WFM)**: Los buffers de silencio del pre-llenado se intercalan con el audio real en el FIFO de waveOut. Como waveOut es FIFO estricto, el orden es: silencio→silencio→...→audio→audio. Los 16 buffers de silencio juegan primero, luego el audio real va al final de la cola → patrón periódico de líneas/negro en el waterfall
+
+### Intento 7 (último, sin probar resultado): waveOut con hilo de reposición
+- `CALLBACK_EVENT` + hilo dedicado (`refillThreadProc`) con prioridad `ABOVE_NORMAL`
+- El hilo espera `WaitForSingleObject(m_refillEvent)` — Windows señaliza el evento en microsegundos cuando un buffer termina (`WOM_DONE`)
+- El hilo re-encola inmediatamente cada buffer con audio real (del pending con mutex) o silencio si no hay datos
+- La cola **nunca está vacía** — siempre hay el siguiente buffer listo antes de que el actual termine
+- **Estado**: Compilado, no probado aún
+
+---
+
+## Fix adicional aplicado: cooldown anti-feedback
+
+`setFilterWidth()` en `activateWFM()` envía un comando al radio → el radio responde con una actualización de modo → la UI actualiza el combo de modos → dispara `wfmActivated(false)` → `deactivateWFM()` mata el demodulador recién creado.
+
+**Fix**: `m_wfmCooldown` de 1 segundo en `MainWindow` que bloquea `deactivateWFM()` durante 1s después de la activación.
+
+---
+
+## Log de debug
+
+Hay un archivo de log activo en `C:\Users\reigc\wfm_debug.txt` que registra:
+- Apertura/cierre del WaveOutWriter
+- Número de paquetes IQ recibidos (cada 50)
+- Estado del sink
+
+---
+
+## Configuración de hs-soundmodem
+
+- **Input device**: `Hi-Fi Cable Output (VB-Audio Hi-Fi Cable)` ← debe coincidir con lo que AetherSDR escribe
+- **RX SampleRate**: 48000 Hz
+- **Dual channel**: activado
+- **Modo A**: FSK G3RUH 9600bd
+- **Modo B**: FSK G3RUH 4800bd
+
+---
+
+## Próximos pasos sugeridos
+

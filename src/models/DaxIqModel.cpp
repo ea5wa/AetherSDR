@@ -24,7 +24,8 @@ DaxIqModel::DaxIqModel(QObject* parent)
     m_worker = new DaxIqWorker;
     m_worker->moveToThread(&m_workerThread);
     connect(&m_workerThread, &QThread::finished, m_worker, &QObject::deleteLater);
-    connect(m_worker, &DaxIqWorker::levelReady, this, &DaxIqModel::iqLevelReady);
+    connect(m_worker, &DaxIqWorker::levelReady,   this, &DaxIqModel::iqLevelReady);
+    connect(m_worker, &DaxIqWorker::samplesReady, this, &DaxIqModel::iqSamplesReady);
     m_workerThread.start();
 }
 
@@ -132,6 +133,10 @@ void DaxIqModel::handleStreamRemoved(quint32 streamId)
 
 void DaxIqModel::feedRawIqPacket(int channel, const QByteArray& rawPayload, int sampleRate)
 {
+    static int s_feedCount = 0;
+    if (++s_feedCount <= 3)
+        qDebug() << "DaxIqModel::feedRawIqPacket ch=" << channel
+                 << "size=" << rawPayload.size() << "rate=" << sampleRate;
     QMetaObject::invokeMethod(m_worker,
         [this, channel, rawPayload, sampleRate] {
             m_worker->processIqPacket(channel, rawPayload, sampleRate);
@@ -249,6 +254,15 @@ void DaxIqWorker::processIqPacket(int channel, const QByteArray& rawPayload, int
         m_sampleCount[idx] = 0;
         m_sumSq[idx] = 0.0;
     }
+
+    // Emit byte-swapped samples for software demodulators (all platforms)
+    QVector<float> samples(numFloats);
+    std::memcpy(samples.data(), swapped.constData(), swapped.size());
+    static int s_emitCount = 0;
+    if (++s_emitCount <= 3)
+        qDebug() << "DaxIqWorker: emitting samplesReady ch=" << channel
+                 << "samples=" << numSamples;
+    emit samplesReady(channel, std::move(samples), sampleRate);
 
     // Write to pipe (non-blocking, Linux/macOS only)
 #ifndef Q_OS_WIN

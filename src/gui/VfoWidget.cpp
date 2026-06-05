@@ -1829,6 +1829,19 @@ void VfoWidget::buildTabContent()
 
             modeRow->addWidget(btn, 1);
         }
+
+        // WFM software demodulator toggle (DAX IQ → Hi-Fi Cable)
+        m_wfmBtn = new QPushButton("WFM");
+        m_wfmBtn->setCheckable(true);
+        m_wfmBtn->setFixedHeight(26);
+        m_wfmBtn->setVisible(false);
+        m_wfmBtn->setToolTip("Software FM demodulator: DAX IQ → Hi-Fi Cable Input");
+        m_wfmBtn->setStyleSheet(kModeBtn);
+        connect(m_wfmBtn, &QPushButton::toggled, this, [this](bool on) {
+            emit wfmActivated(on, m_slice ? m_slice->sliceId() : -1);
+        });
+        modeRow->addWidget(m_wfmBtn, 1);
+
         vb->addLayout(modeRow);
 
         // Filter preset grid (4 columns, rebuilt on mode change)
@@ -2700,6 +2713,12 @@ void VfoWidget::setSlice(SliceModel* slice)
         bool isFdv  = mode.startsWith("FDV");  // FDVU, FDVM, etc.
         // Swap DSP tab label to OPT for FM modes
         m_tabBtns[1]->setText(isFm ? "OPT" : "DSP");
+        if (!isFm && m_wfmBtn->isChecked()) {
+            QSignalBlocker sb(m_wfmBtn);
+            m_wfmBtn->setChecked(false);
+            emit wfmActivated(false, m_slice ? m_slice->sliceId() : -1);
+        }
+        m_wfmBtn->setVisible(isFm);
         m_rttyContainer->setVisible(isRtty);
         m_apfContainer->setVisible(isCw);
         m_digContainer->setVisible(isDig && !isFdv && mode != "NT");
@@ -3240,6 +3259,12 @@ void VfoWidget::syncFromSlice()
     bool isDig = (m_slice->mode() == "DIGL" || m_slice->mode() == "DIGU" || m_slice->mode() == "NT");
     bool isFm = (m_slice->mode() == "FM" || m_slice->mode() == "NFM");
     m_tabBtns[1]->setText(isFm ? "OPT" : "DSP");
+    if (!isFm && m_wfmBtn->isChecked()) {
+        QSignalBlocker sb(m_wfmBtn);
+        m_wfmBtn->setChecked(false);
+        emit wfmActivated(false, m_slice->sliceId());
+    }
+    m_wfmBtn->setVisible(isFm);
     m_apfBtn->setVisible(isCw);
     m_anfBtn->setVisible(!isRtty && !isCw && !isDig && !isFm);
     m_anflBtn->setVisible(!isRtty && !isCw && !isDig && !isFm);

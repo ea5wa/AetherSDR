@@ -190,6 +190,9 @@
 #ifdef HAVE_RADE
 #include "core/RADEEngine.h"
 #endif
+#include "core/WfmDemodulator.h"
+#include "core/PanadapterStream.h"
+#include "gui/WfmDeviceDialog.h"
 #if defined(Q_OS_MAC)
 #include "core/VirtualAudioBridge.h"
 #include <QFileInfo>
@@ -3308,6 +3311,11 @@ MainWindow::MainWindow(QWidget* parent)
         else if (sliceId == m_radeSliceId) deactivateRADE();
     });
 #endif
+    connect(m_appletPanel->rxApplet(), &RxApplet::wfmActivated,
+            this, [this](bool on, int sliceId) {
+        if (on) activateWFM(sliceId);
+        else    deactivateWFM();
+    });
 
     // ── Tuning step size ───────────────────────────────────────────────────
     // Two connections, split by source.  stepSizeChanged fires for ANY step
@@ -3365,6 +3373,10 @@ MainWindow::MainWindow(QWidget* parent)
             m_appletPanel, &AppletPanel::setAntennaList);
     // Overlay-menu antenna wiring is now per-pan in wirePanadapter() (#1260).
     // Antenna list and S-meter are now wired per-widget in onSliceAdded.
+
+    // ── Title bar: Pan Follow ────────────────────────────────────────────────
+    connect(m_titleBar, &TitleBar::panFollowToggled,
+            this, &MainWindow::setPanFollow);
 
     // ── Title bar: PC Audio, master volume, headphone volume ────────────────
     // The remote_audio_rx stream controls the radio's audio routing:
@@ -13712,6 +13724,10 @@ void MainWindow::wireVfoWidget(VfoWidget* w, SliceModel* s)
         else if (sliceId == m_radeSliceId) deactivateRADE();
     });
 #endif
+    connect(w, &VfoWidget::wfmActivated, this, [this](bool on, int sliceId) {
+        if (on) activateWFM(sliceId);
+        else    deactivateWFM();
+    });
 
     // AetherDSP button on the per-slice DSP tab — same entry point as the
     // Settings menu action and the RX chain double-click; reuses the
@@ -17861,6 +17877,153 @@ void MainWindow::onSpectrumReadyForSHistory(quint32 streamId, const QVector<floa
             PerfTelemetry::instance().recordSHistorySkipped();
         }
     }
+}
+
+// ─── WFM software demodulator ────────────────────────────────────────────────
+
+void MainWindow::activateWFM(int sliceId)
+{
+    if (m_wfmSliceId == sliceId) return;
+    deactivateWFM();
+
+    m_wfmCooldown = true;
+    QTimer::singleShot(1000, this, [this]{ m_wfmCooldown = false; });
+
+    auto* s = m_radioModel.slice(sliceId);
+    if (!s) return;
+
+    // Resolve audio output device FIRST — before touching the radio or
+    // establishing any connections.  The dialog can take several seconds and
+    // any pan/filter commands sent while it is open would race with SatPC32's
+    // Doppler corrections on port 4992.
+    auto resolveAudioDevice = [this]() -> QString {
+        while (true) {
+            QString device = AppSettings::instance()
+                                 .value("WfmAudioDevice").toString().trimmed();
+            if (device.isEmpty()) {
+                WfmDeviceDialog dlg(this);
+                if (dlg.exec() != QDialog::Accepted || dlg.selectedDevice().isEmpty())
+                    return {};   // user cancelled
+                device = dlg.selectedDevice();
+                if (dlg.rememberChoice()) {
+                    AppSettings::instance().setValue("WfmAudioDevice", device);
+                    AppSettings::instance().save();
+                }
+            }
+            return device;
+        }
+    };
+
+    const QString audioDevice = resolveAudioDevice();
+    if (audioDevice.isEmpty()) {
+        // User cancelled the device picker — abort activation.
+        m_wfmSliceId = -1;
+        return;
+    }
+
+    // Device confirmed — now it is safe to interact with the radio.
+
+    // Save current filter so deactivateWFM can restore it.
+    m_wfmPrevFilterLo = s->filterLow();
+    m_wfmPrevFilterHi = s->filterHigh();
+
+    // Widen IF filter for G3RUH (±20 kHz).
+    s->setFilterWidth(-WfmDemodulator::FILTER_HZ, WfmDemodulator::FILTER_HZ);
+    m_wfmSliceId = sliceId;
+
+    // Center the panadapter on the slice frequency so the DAX IQ RX 1 is
+    // centered at the satellite signal.  Also follow slice frequency changes
+    // (Doppler tracking via CAT) so the pan stays locked to the signal.
+    // Guard: skip if the pan is already at the slice frequency — avoids sending
+    // redundant "display pan set" commands that could race against SmartSDR CAT's
+    // "slice tune" and briefly revert the Doppler correction via pan-locked tuning.
+    auto centerPanAtSlice = [this, s]() {
+        const QString panId = s->panId();
+        if (panId.isEmpty()) return;
+        const double freq = s->frequency();
+        auto* pan = m_radioModel.panadapter(panId);
+        if (pan && qFuzzyCompare(pan->centerMhz(), freq)) return;
+        const QString freqStr = QString::number(freq, 'f', 6);
+        if (pan) pan->applyPanStatus({{"center", freqStr}});
+        m_radioModel.sendCommand(
+            QString("display pan set %1 center=%2").arg(panId, freqStr));
+    };
+    centerPanAtSlice();
+    m_wfmFreqConn = connect(s, &SliceModel::frequencyChanged,
+                            this, [centerPanAtSlice](double) { centerPanAtSlice(); });
+
+    // Software FM demodulation: DAX IQ → discriminator → chosen VAC at 48 kHz.
+    // freqOffsetHz=0 because DAX IQ RX 1 is already centered at the slice
+    // frequency (not the panadapter center), so no correction is needed.
+    m_wfmDemod = new WfmDemodulator(this);
+    connect(m_wfmDemod, &WfmDemodulator::commandReady,
+            &m_radioModel, &RadioModel::sendCommand);
+    // Slice audio_level → WfmDemodulator volume. Connecting to the SliceModel
+    // covers all control paths (RxApplet slider, VfoWidget slider, CAT, etc.)
+    // rather than wiring individual UI sources.
+    m_wfmDemod->setVolume(static_cast<int>(s->audioGain()));
+    connect(s, &SliceModel::audioGainChanged,
+            m_wfmDemod, [demod = m_wfmDemod](float g) { demod->setVolume(static_cast<int>(g)); });
+    m_wfmDemod->start(&m_radioModel.daxIqModel(), audioDevice, s->panId(), 0.0f);
+    if (!m_wfmDemod->isActive()) {
+        // Saved device failed to open (driver missing, device unplugged, etc.).
+        // Clear the preference so the picker shows again on the next attempt.
+        AppSettings::instance().setValue("WfmAudioDevice", QString());
+        AppSettings::instance().save();
+        delete m_wfmDemod;
+        m_wfmDemod = nullptr;
+        m_wfmSliceId = -1;
+    }
+}
+
+void MainWindow::deactivateWFM()
+{
+    if (m_wfmSliceId < 0) return;
+    if (m_wfmCooldown) return;
+
+    disconnect(m_wfmFreqConn);
+
+    if (m_wfmDemod) {
+        delete m_wfmDemod;
+        m_wfmDemod = nullptr;
+    }
+
+    // Restore the filter that was active before WFM was enabled.
+    if (auto* s = m_radioModel.slice(m_wfmSliceId)) {
+        if (m_wfmPrevFilterLo != 0 || m_wfmPrevFilterHi != 0)
+            s->setFilterWidth(m_wfmPrevFilterLo, m_wfmPrevFilterHi);
+    }
+
+    m_wfmSliceId = -1;
+    m_wfmPrevFilterLo = 0;
+    m_wfmPrevFilterHi = 0;
+}
+
+// ─── Pan Follow ───────────────────────────────────────────────────────────────
+
+void MainWindow::setPanFollow(bool on)
+{
+    disconnect(m_panFollowConn);
+    if (!on) return;
+
+    auto* s = m_radioModel.slice(0);
+    if (!s) return;
+
+    auto centerPan = [this, s]() {
+        const QString panId = s->panId();
+        if (panId.isEmpty()) return;
+        const double freq = s->frequency();
+        auto* pan = m_radioModel.panadapter(panId);
+        if (pan && qFuzzyCompare(pan->centerMhz(), freq)) return;
+        const QString freqStr = QString::number(freq, 'f', 6);
+        if (pan) pan->applyPanStatus({{"center", freqStr}});
+        m_radioModel.sendCommand(
+            QString("display pan set %1 center=%2").arg(panId, freqStr));
+    };
+
+    centerPan();
+    m_panFollowConn = connect(s, &SliceModel::frequencyChanged,
+                              this, [centerPan](double) { centerPan(); });
 }
 
 } // namespace AetherSDR
