@@ -123,6 +123,8 @@
 #include "WaveformsDialog.h"
 #include "ClientRxDspApplet.h"
 #include "DspParamPopup.h"
+#include "GuardedSlider.h"
+#include "MeterSlider.h"
 #include "FramelessResizer.h"
 #include "FramelessWindowTitleBar.h"
 
@@ -859,6 +861,15 @@ static bool shortcutInputCaptured()
 
 static bool shortcutGuard() {
     return s_keyboardShortcutsEnabled && !shortcutInputCaptured();
+}
+
+// True while the lease holder is actively being dragged with the mouse, so the
+// lease must not time out mid-drag.  Covers both QAbstractSlider handles and the
+// MeterSlider (TCI/DAX) custom fader.
+static bool leaseHolderBusy(QWidget* w) {
+    if (auto* s = qobject_cast<QAbstractSlider*>(w)) return s->isSliderDown();
+    if (auto* m = qobject_cast<AetherSDR::MeterSlider*>(w)) return m->isDragging();
+    return false;
 }
 
 static QKeySequence shortcutSequenceFromKeyEvent(const QKeyEvent* ev)
@@ -7715,7 +7726,7 @@ void MainWindow::showPropDashboard()
     showOrRaisePersistent(m_propDashboardDialog, m_propForecast);
 }
 
-void MainWindow::beginSliderShortcutLease(QAbstractSlider* slider)
+void MainWindow::beginSliderShortcutLease(QWidget* slider)
 {
     if (!slider) return;
 
@@ -7735,7 +7746,7 @@ void MainWindow::renewSliderShortcutLease()
     s_sliderShortcutLeaseActive = true;
     m_shortcutManager.setShortcutsEnabled(false);
 
-    if (m_sliderShortcutLease->isSliderDown()) {
+    if (leaseHolderBusy(m_sliderShortcutLease.data())) {
         m_sliderShortcutLeaseTimer.stop();
         return;
     }
@@ -7747,7 +7758,7 @@ void MainWindow::releaseSliderShortcutLease(bool clearFocus)
 {
     auto* slider = m_sliderShortcutLease.data();
 
-    if (clearFocus && slider && slider->isSliderDown()) {
+    if (clearFocus && slider && leaseHolderBusy(slider)) {
         renewSliderShortcutLease();
         return;
     }
@@ -7779,6 +7790,16 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
             beginSliderShortcutLease(slider);
         } else if (event->type() == QEvent::MouseButtonRelease
                    && m_sliderShortcutLease.data() == slider) {
+            renewSliderShortcutLease();
+        }
+    } else if (auto* meter = qobject_cast<AetherSDR::MeterSlider*>(obj)) {
+        // MeterSlider (TCI/DAX gain) gets the same lease so a mouse drag hands
+        // off to keyboard nudges, then global shortcuts resume after a beat.
+        if (event->type() == QEvent::MouseButtonPress
+            || event->type() == QEvent::MouseButtonDblClick) {
+            beginSliderShortcutLease(meter);
+        } else if (event->type() == QEvent::MouseButtonRelease
+                   && m_sliderShortcutLease.data() == meter) {
             renewSliderShortcutLease();
         }
     }
@@ -7841,18 +7862,47 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
             return true;  // always consume Space to prevent button activation
         }
 
+        // MeterSlider (TCI/DAX gain) handles its own arrow stepping, badge,
+        // and Enter-to-release inside keyPressEvent; the lease only frees the
+        // arrows from the global tune/AF shortcuts.  Renew it on each step so
+        // it doesn't expire mid-adjustment, then let the key fall through.
+        if (event->type() == QEvent::KeyPress) {
+            auto* meter = qobject_cast<AetherSDR::MeterSlider*>(QApplication::focusWidget());
+            if (meter && m_sliderShortcutLease.data() == meter && s_sliderShortcutLeaseActive) {
+                int k = ke->key();
+                if (k == Qt::Key_Left || k == Qt::Key_Right
+                    || k == Qt::Key_Up || k == Qt::Key_Down)
+                    renewSliderShortcutLease();
+            }
+        }
+
         // A clicked slider gets a short keyboard lease so arrow nudges adjust
         // the slider, then global operating shortcuts automatically resume.
         if (event->type() == QEvent::KeyPress) {
             auto* slider = qobject_cast<QAbstractSlider*>(QApplication::focusWidget());
             if (slider && m_sliderShortcutLease.data() == slider && s_sliderShortcutLeaseActive) {
                 int k = ke->key();
+                // Enter hands keyboard control straight back to the panadapter's
+                // global shortcuts, instead of waiting for the lease to time out.
+                if (k == Qt::Key_Return || k == Qt::Key_Enter) {
+                    releaseSliderShortcutLease(true);
+                    return true;
+                }
+                // After a keyboard nudge, flash the same value badge the mouse
+                // drag shows so keyboard and mouse give identical feedback.
+                // GuardedSlider has no Q_OBJECT macro, so reach it via
+                // dynamic_cast rather than qobject_cast.
+                auto flashBadge = [slider]() {
+                    if (auto* gs = dynamic_cast<GuardedSlider*>(slider))
+                        gs->flashDragValue();
+                };
                 if (k == Qt::Key_Left || k == Qt::Key_Right
                     || k == Qt::Key_Up || k == Qt::Key_Down) {
                     bool increase = (k == Qt::Key_Right || k == Qt::Key_Up);
                     int step = (ke->modifiers() & Qt::ControlModifier)
                                    ? slider->pageStep() : slider->singleStep();
                     slider->setValue(slider->value() + (increase ? step : -step));
+                    flashBadge();
                     renewSliderShortcutLease();
                     return true;
                 }
@@ -7860,6 +7910,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
                     const int step = slider->pageStep();
                     slider->setValue(slider->value()
                                      + (k == Qt::Key_PageUp ? step : -step));
+                    flashBadge();
                     renewSliderShortcutLease();
                     return true;
                 }
@@ -7867,6 +7918,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
                     slider->setValue(k == Qt::Key_Home
                                          ? slider->minimum()
                                          : slider->maximum());
+                    flashBadge();
                     renewSliderShortcutLease();
                     return true;
                 }
@@ -15589,6 +15641,8 @@ void MainWindow::registerShortcutActions()
             [this](QWidget* /*old*/, QWidget* now) {
         if (auto* slider = qobject_cast<QAbstractSlider*>(now))
             beginSliderShortcutLease(slider);
+        else if (auto* meter = qobject_cast<AetherSDR::MeterSlider*>(now))
+            beginSliderShortcutLease(meter);
         else
             releaseSliderShortcutLease(false);
     });
