@@ -219,6 +219,34 @@ TitleBar::TitleBar(QWidget* parent)
     // ── PC Audio + Master Vol + HP Vol ──────────────────────────────────────
     auto& s = AppSettings::instance();
 
+    // Pan Follow toggle — keeps the panadapter centered on Slice A frequency
+    m_panFollowBtn = new QPushButton("Pan Lock");
+    m_panFollowBtn->setCheckable(true);
+    m_panFollowBtn->setChecked(false);
+    m_panFollowBtn->setFixedHeight(22);
+    m_panFollowBtn->setFixedWidth(70);
+    m_panFollowBtn->setAccessibleName("Pan follow slice");
+    m_panFollowBtn->setAccessibleDescription("Keep panadapter centered on Slice A frequency");
+    m_panFollowBtn->setToolTip("Pan Lock — keeps the panadapter centered on Slice A frequency (e.g. for Doppler tracking)");
+
+    auto updatePanFollowStyle = [this]() {
+        m_panFollowBtn->setStyleSheet(m_panFollowBtn->isChecked()
+            ? "QPushButton { background: #1e4a8a; color: #b0e8ff; border: 1px solid #4090d0; "
+              "border-radius: 3px; font-size: 10px; font-weight: bold; }"
+              "QPushButton:hover { background: #2558a0; }"
+            : "QPushButton { background: #1a2a3a; color: #607080; border: 1px solid #304050; "
+              "border-radius: 3px; font-size: 10px; font-weight: bold; }"
+              "QPushButton:hover { background: #243848; }");
+    };
+    updatePanFollowStyle();
+
+    connect(m_panFollowBtn, &QPushButton::toggled, this, [this, updatePanFollowStyle](bool on) {
+        updatePanFollowStyle();
+        emit panFollowToggled(on);
+    });
+    m_hbox->addWidget(m_panFollowBtn);
+    m_hbox->addSpacing(4);
+
     // PC Audio toggle
     m_pcBtn = new QPushButton("PC Audio");
     m_pcBtn->setCheckable(true);

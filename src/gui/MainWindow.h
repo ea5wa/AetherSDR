@@ -929,6 +929,10 @@ private:
     void onFdvMetersChanged();
 #endif
 
+    // Pan Follow — keeps the panadapter centered on Slice A frequency
+    QMetaObject::Connection m_panFollowConn;
+    void setPanFollow(bool on);
+
 #if defined(Q_OS_MAC) || defined(HAVE_PIPEWIRE)
     DaxBridge* m_daxBridge{nullptr};
     QString m_savedMicSelection;  // restore on stopDax
