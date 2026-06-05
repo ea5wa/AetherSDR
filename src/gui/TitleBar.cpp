@@ -222,7 +222,8 @@ TitleBar::TitleBar(QWidget* parent)
     // Pan Follow toggle — keeps the panadapter centered on Slice A frequency
     m_panFollowBtn = new QPushButton("Pan Lock");
     m_panFollowBtn->setCheckable(true);
-    m_panFollowBtn->setChecked(false);
+    bool panLockOn = s.value("PanLockEnabled", "False").toString() == "True";
+    m_panFollowBtn->setChecked(panLockOn);
     m_panFollowBtn->setFixedHeight(22);
     m_panFollowBtn->setFixedWidth(70);
     m_panFollowBtn->setAccessibleName("Pan follow slice");
@@ -242,6 +243,9 @@ TitleBar::TitleBar(QWidget* parent)
 
     connect(m_panFollowBtn, &QPushButton::toggled, this, [this, updatePanFollowStyle](bool on) {
         updatePanFollowStyle();
+        auto& ss = AppSettings::instance();
+        ss.setValue("PanLockEnabled", on ? "True" : "False");
+        ss.save();
         emit panFollowToggled(on);
     });
     m_hbox->addWidget(m_panFollowBtn);
