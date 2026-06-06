@@ -577,6 +577,8 @@ set(CORE_SOURCES
     src/core/SleepInhibitor.cpp
     src/core/MemoryCsvCompat.cpp
     src/core/MemoryRecallPolicy.cpp
+    src/core/WfmDemodulator.cpp
+    src/core/WaveOutWriter.cpp
     src/core/tnc/AetherAx25LibmodemShim.cpp
     src/core/tnc/Ax25FrameFormatter.cpp
     src/core/tnc/Ax25.cpp
@@ -634,6 +636,7 @@ set(GUI_SOURCES
     src/gui/MainWindow.cpp
     src/gui/AgcCalibrationDialog.cpp
     src/gui/AudioDeviceChangeDialog.cpp
+    src/gui/WfmDeviceDialog.cpp
     src/gui/ConnectionPanel.cpp
     src/gui/ClientDisconnectDialog.cpp
     src/gui/ConnectedStationsDialog.cpp
@@ -951,16 +954,6 @@ endif()
 
 qt_add_resources(RESOURCES resources/resources.qrc)
 
-if(WIN32)
-    list(APPEND CORE_SOURCES
-        src/core/WfmDemodulator.cpp
-        src/core/WaveOutWriter.cpp
-        src/core/WaveInReader.cpp
-    )
-    list(APPEND GUI_SOURCES
-        src/gui/WfmDeviceDialog.cpp
-    )
-endif()
 add_executable(AetherSDR ${ALL_SOURCES} ${RNNOISE_SOURCES} ${GGMORSE_SOURCES} ${RADE_SOURCES} ${BNR_SOURCES} ${SPECBLEACH_SOURCES} ${RESOURCES} ${DFNR_RESOURCES})
 
 if (USE_SYSTEM_ZLIB)

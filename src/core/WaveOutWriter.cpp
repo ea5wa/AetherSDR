@@ -1,8 +1,6 @@
-#include "WaveOutWriter.h"
-#include <QTextStream>
-#include <algorithm>
-#include <cstring>
-
+#include "core/WaveOutWriter.h"
+#include "core/LogManager.h"
+#include <QMediaDevices>
 
 namespace AetherSDR {
 
@@ -15,151 +13,74 @@ WaveOutWriter::~WaveOutWriter()
     close();
 }
 
-bool WaveOutWriter::open(const QString& deviceNameFragment, int sampleRate,
-                          int channels, int bitsPerSample)
+bool WaveOutWriter::open(const QString& deviceId, int sampleRate, int channelCount)
 {
     close();
 
-    // Find matching waveOut device
-    const UINT numDevs = waveOutGetNumDevs();
-    UINT       devId   = WAVE_MAPPER;
-    {
-        QString allDevs;
-        for (UINT i = 0; i < numDevs; ++i) {
-            WAVEOUTCAPSW caps{};
-            if (waveOutGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
-                const QString name = QString::fromWCharArray(caps.szPname);
-                allDevs += QString("  [%1] %2\n").arg(i).arg(name);
-                if (m_deviceName.isEmpty()
-                        && name.contains(deviceNameFragment, Qt::CaseInsensitive)) {
-                    devId = i;
-                    m_deviceName = name;
-                }
-            }
+    // Find the requested device by its persistent ID string.
+    QAudioDevice found;
+    const auto outputs = QMediaDevices::audioOutputs();
+    qCDebug(lcAudio) << "WaveOutWriter::open looking for" << deviceId
+                     << "among" << outputs.size() << "devices";
+    for (const QAudioDevice& dev : outputs) {
+        if (dev.id() == deviceId.toUtf8()) {
+            found = dev;
+            break;
         }
-        qDebug().noquote() << QString("WaveOutWriter::open looking for '%1' among %2 devices:\n%3")
-               .arg(deviceNameFragment).arg(numDevs).arg(allDevs.trimmed());
     }
-    // Fail explicitly if the named device wasn't found — don't fall back to
-    // WAVE_MAPPER (which would silently route audio to the default speakers).
-    if (!deviceNameFragment.isEmpty() && m_deviceName.isEmpty()) {
-        qDebug().noquote() << QString("WaveOutWriter::open: '%1' not found — aborting").arg(deviceNameFragment);
-        return false;
-    }
-    if (m_deviceName.isEmpty())
-        m_deviceName = "(default)";
-
-    WAVEFORMATEX wfx{};
-    wfx.wFormatTag      = WAVE_FORMAT_PCM;
-    wfx.nChannels       = static_cast<WORD>(channels);
-    wfx.nSamplesPerSec  = static_cast<DWORD>(sampleRate);
-    wfx.wBitsPerSample  = static_cast<WORD>(bitsPerSample);
-    wfx.nBlockAlign     = wfx.nChannels * (wfx.wBitsPerSample / 8);
-    wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
-
-    // Create event — waveOut signals it every time a buffer completes (WOM_DONE)
-    m_refillEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-
-    const MMRESULT res = waveOutOpen(&m_hWaveOut, devId, &wfx,
-                                     reinterpret_cast<DWORD_PTR>(m_refillEvent),
-                                     0, CALLBACK_EVENT);
-    if (res != MMSYSERR_NOERROR) {
-        qDebug().noquote() << QString("waveOutOpen failed: %1").arg(res);
-        CloseHandle(m_refillEvent);
-        m_refillEvent = nullptr;
-        m_hWaveOut    = nullptr;
+    if (found.isNull()) {
+        qCDebug(lcAudio) << "WaveOutWriter::open: device not found —" << deviceId;
         return false;
     }
 
-    // Prepare buffers
-    m_bytesPerBuf = BUF_SAMPLES * channels * (bitsPerSample / 8);
-    for (int i = 0; i < NUM_BUFS; ++i) {
-        m_buffers[i].resize(m_bytesPerBuf, 0);
-        auto& hdr = m_headers[i];
-        std::memset(&hdr, 0, sizeof(hdr));
-        hdr.lpData         = m_buffers[i].data();
-        hdr.dwBufferLength = static_cast<DWORD>(m_bytesPerBuf);
-        waveOutPrepareHeader(m_hWaveOut, &hdr, sizeof(hdr));
-        // Pre-queue silence so driver is always playing something
-        waveOutWrite(m_hWaveOut, &hdr, sizeof(hdr));
+    QAudioFormat fmt;
+    fmt.setSampleRate(sampleRate);
+    fmt.setChannelCount(channelCount);
+    fmt.setSampleFormat(QAudioFormat::Int16);
+
+    if (!found.isFormatSupported(fmt)) {
+        qCDebug(lcAudio) << "WaveOutWriter::open: Int16 format not supported by"
+                         << found.description() << "— trying default format";
+        fmt = found.preferredFormat();
     }
 
-    // Start refill thread
-    m_running      = true;
-    m_refillThread = CreateThread(NULL, 0, refillThreadProc, this, 0, NULL);
-    SetThreadPriority(m_refillThread, THREAD_PRIORITY_ABOVE_NORMAL);
+    m_sink = new QAudioSink(found, fmt, this);
+    m_io   = m_sink->start();
 
-    qDebug().noquote() << QString("WaveOutWriter opened: device='%1' rate=%2 ch=%3 bits=%4 bufBytes=%5")
-           .arg(m_deviceName).arg(sampleRate).arg(channels).arg(bitsPerSample).arg(m_bytesPerBuf);
+    if (!m_io || m_sink->error() != QAudio::NoError) {
+        qCDebug(lcAudio) << "WaveOutWriter::open: QAudioSink::start() failed, error="
+                         << m_sink->error();
+        delete m_sink;
+        m_sink = nullptr;
+        m_io   = nullptr;
+        return false;
+    }
+
+    m_deviceName = found.description();
+    qCDebug(lcAudio) << "WaveOutWriter opened:" << m_deviceName
+                     << "rate=" << fmt.sampleRate()
+                     << "ch="   << fmt.channelCount()
+                     << "fmt="  << fmt.sampleFormat();
     return true;
 }
 
 void WaveOutWriter::close()
 {
-    if (!m_hWaveOut) return;
-
-    m_running = false;
-    if (m_refillEvent) SetEvent(m_refillEvent);  // wake thread so it can exit
-    if (m_refillThread) {
-        WaitForSingleObject(m_refillThread, 2000);
-        CloseHandle(m_refillThread);
-        m_refillThread = nullptr;
+    if (m_sink) {
+        m_sink->stop();
+        delete m_sink;
+        m_sink = nullptr;
+        m_io   = nullptr;
+        qCDebug(lcAudio) << "WaveOutWriter closed";
     }
-
-    waveOutReset(m_hWaveOut);
-    for (int i = 0; i < NUM_BUFS; ++i)
-        waveOutUnprepareHeader(m_hWaveOut, &m_headers[i], sizeof(m_headers[i]));
-    waveOutClose(m_hWaveOut);
-    m_hWaveOut = nullptr;
-
-    if (m_refillEvent) {
-        CloseHandle(m_refillEvent);
-        m_refillEvent = nullptr;
-    }
-
-    m_pending.clear();
-    qDebug().noquote() << "WaveOutWriter closed";
+    m_deviceName.clear();
 }
 
 void WaveOutWriter::write(const QByteArray& pcm)
 {
-    QMutexLocker lock(&m_mutex);
-    m_pending.append(pcm);
-}
-
-// static
-DWORD WINAPI WaveOutWriter::refillThreadProc(LPVOID param)
-{
-    WaveOutWriter* w = reinterpret_cast<WaveOutWriter*>(param);
-    while (w->m_running) {
-        // Wait for WOM_DONE event (or close signal)
-        WaitForSingleObject(w->m_refillEvent, 50);
-        if (w->m_running)
-            w->refillDoneBuffers();
-    }
-    return 0;
-}
-
-void WaveOutWriter::refillDoneBuffers()
-{
-    for (int i = 0; i < NUM_BUFS; ++i) {
-        auto& hdr = m_headers[i];
-        if (!(hdr.dwFlags & WHDR_DONE)) continue;
-
-        {
-            QMutexLocker lock(&m_mutex);
-            if (m_pending.size() >= m_bytesPerBuf) {
-                std::memcpy(m_buffers[i].data(), m_pending.constData(), m_bytesPerBuf);
-                m_pending.remove(0, m_bytesPerBuf);
-            } else {
-                // No real audio ready — queue silence to keep driver busy
-                std::memset(m_buffers[i].data(), 0, m_bytesPerBuf);
-            }
-        }
-
-        hdr.dwFlags &= ~WHDR_DONE;
-        waveOutWrite(m_hWaveOut, &hdr, sizeof(hdr));
-    }
+    if (!m_io || pcm.isEmpty())
+        return;
+    m_io->write(pcm);
 }
 
 } // namespace AetherSDR

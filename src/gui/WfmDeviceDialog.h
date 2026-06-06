@@ -1,35 +1,42 @@
 #pragma once
-
+#include <QAudioDevice>
 #include <QDialog>
-#include <QStringList>
 
-class QListWidget;
 class QCheckBox;
-class QLabel;
+class QDialogButtonBox;
+class QListWidget;
 
 namespace AetherSDR {
 
-// Dialog shown on the first WFM activation (or when no device is saved).
-// Enumerates available waveOut audio devices and lets the user pick one.
-// The selection can be persisted via the "Remember this choice" checkbox
-// so the dialog does not appear again on subsequent activations.
-class WfmDeviceDialog : public QDialog {
+// Audio output device picker for the WFM demodulator.
+// Lists all available output devices via QMediaDevices::audioOutputs() —
+// cross-platform: works on Windows, macOS, and Linux.
+// The selected device is identified by QAudioDevice::id() (a persistent
+// opaque byte string) rather than a human-readable name, so it survives
+// device renames and reordering.
+class WfmDeviceDialog : public QDialog
+{
     Q_OBJECT
-
 public:
     explicit WfmDeviceDialog(QWidget* parent = nullptr);
 
-    // Full device name chosen by the user, or empty if cancelled.
-    QString selectedDevice() const;
+    // Returns the QAudioDevice::id() of the selected device, or empty if
+    // none was selected / the dialog was cancelled.
+    QString selectedDeviceId() const;
 
-    // True when the user ticked "Remember this choice".
+    // Returns the human-readable description of the selected device.
+    QString selectedDeviceName() const;
+
     bool rememberChoice() const;
 
 private:
-    static QStringList enumerateDevices();
+    void populate();
 
-    QListWidget* m_list{nullptr};
-    QCheckBox*   m_remember{nullptr};
+    QListWidget*      m_list{nullptr};
+    QCheckBox*        m_rememberCheck{nullptr};
+    QDialogButtonBox* m_buttons{nullptr};
+
+    QList<QAudioDevice> m_devices;
 };
 
 } // namespace AetherSDR

@@ -204,6 +204,7 @@
 #include "core/WfmDemodulator.h"
 #include "core/PanadapterStream.h"
 #include "gui/WfmDeviceDialog.h"
+#include "core/WfmSettings.h"
 #if defined(Q_OS_MAC)
 #include "core/VirtualAudioBridge.h"
 #include <QFileInfo>
@@ -19088,24 +19089,21 @@ void MainWindow::activateWFM(int sliceId)
 
     auto resolveAudioDevice = [this]() -> QString {
         while (true) {
-            QString device = AppSettings::instance()
-                                 .value("WfmAudioDevice").toString().trimmed();
-            if (device.isEmpty()) {
+            QString deviceId = WfmSettings::audioDeviceId().trimmed();
+            if (deviceId.isEmpty()) {
                 WfmDeviceDialog dlg(this);
-                if (dlg.exec() != QDialog::Accepted || dlg.selectedDevice().isEmpty())
-                    return {};
-                device = dlg.selectedDevice();
-                if (dlg.rememberChoice()) {
-                    AppSettings::instance().setValue("WfmAudioDevice", device);
-                    AppSettings::instance().save();
-                }
+                if (dlg.exec() != QDialog::Accepted || dlg.selectedDeviceId().isEmpty())
+                    return {};   // user cancelled
+                deviceId = dlg.selectedDeviceId();
+                if (dlg.rememberChoice())
+                    WfmSettings::setAudioDeviceId(deviceId);
             }
-            return device;
+            return deviceId;
         }
     };
 
-    const QString audioDevice = resolveAudioDevice();
-    if (audioDevice.isEmpty()) {
+    const QString audioDeviceId = resolveAudioDevice();
+    if (audioDeviceId.isEmpty()) {
         m_wfmSliceId = -1;
         return;
     }
@@ -19136,10 +19134,9 @@ void MainWindow::activateWFM(int sliceId)
     m_wfmDemod->setVolume(static_cast<int>(s->audioGain()));
     connect(s, &SliceModel::audioGainChanged,
             m_wfmDemod, [demod = m_wfmDemod](float g) { demod->setVolume(static_cast<int>(g)); });
-    m_wfmDemod->start(&m_radioModel.daxIqModel(), audioDevice, s->panId(), 0.0f);
+    m_wfmDemod->start(&m_radioModel.daxIqModel(), audioDeviceId, s->panId(), 0.0f);
     if (!m_wfmDemod->isActive()) {
-        AppSettings::instance().setValue("WfmAudioDevice", QString());
-        AppSettings::instance().save();
+        WfmSettings::clearAudioDeviceId();
         delete m_wfmDemod;
         m_wfmDemod = nullptr;
         m_wfmSliceId = -1;

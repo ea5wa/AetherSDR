@@ -1,59 +1,43 @@
 #pragma once
-
-#include <QObject>
+#include <QAudioDevice>
+#include <QAudioFormat>
+#include <QAudioSink>
 #include <QByteArray>
+#include <QIODevice>
+#include <QObject>
 #include <QString>
-#include <QMutex>
-#include <windows.h>
-#include <mmsystem.h>
 
 namespace AetherSDR {
 
-// Writes PCM audio to a Windows waveOut device using a dedicated refill thread.
-// When each buffer finishes playing, the thread immediately re-queues it with
-// real audio (from the ring) or silence — the queue is NEVER empty.
-//
-// sampleRate   : 48000
-// channels     : 2 (stereo)
-// bitsPerSample: 16 (Int16)
-class WaveOutWriter : public QObject {
+// Cross-platform audio output wrapper backed by QAudioSink (Qt6 Multimedia).
+// Accepts Int16 stereo PCM at a fixed sample rate and writes it to the
+// selected output device — works on Windows (WASAPI), macOS (CoreAudio),
+// and Linux (PipeWire / PulseAudio / ALSA).
+class WaveOutWriter : public QObject
+{
     Q_OBJECT
-
 public:
     explicit WaveOutWriter(QObject* parent = nullptr);
     ~WaveOutWriter() override;
 
-    bool open(const QString& deviceNameFragment, int sampleRate = 48000,
-              int channels = 2, int bitsPerSample = 16);
-    void close();
-    bool isOpen() const { return m_hWaveOut != nullptr; }
+    // Open the device whose description contains |deviceId| (the
+    // QAudioDevice::id() string stored in WfmSettings).  Returns true on
+    // success.  |sampleRate| is the output rate in Hz (typically 48000).
+    bool open(const QString& deviceId, int sampleRate, int channelCount = 2);
 
-    // Push PCM bytes from the IQ processing thread (thread-safe).
+    void close();
+
+    // Write Int16 interleaved PCM samples.  Thread-safe: may be called from
+    // any thread; internally posts to the Qt event loop.
     void write(const QByteArray& pcm);
 
+    bool isOpen() const { return m_sink != nullptr; }
     QString deviceName() const { return m_deviceName; }
 
-    // Called by the refill thread — do not call directly.
-    void refillDoneBuffers();
-
 private:
-    static constexpr int NUM_BUFS    = 8;    // rotating buffers
-    static constexpr int BUF_SAMPLES = 512;  // 10 ms at 48 kHz
-
-    static DWORD WINAPI refillThreadProc(LPVOID param);
-
-    HWAVEOUT   m_hWaveOut{nullptr};
-    HANDLE     m_refillEvent{nullptr};
-    HANDLE     m_refillThread{nullptr};
-    volatile bool m_running{false};
-
-    WAVEHDR    m_headers[NUM_BUFS]{};
-    QByteArray m_buffers[NUM_BUFS];
-    int        m_bytesPerBuf{0};
-
-    QByteArray m_pending;
-    QMutex     m_mutex;
-    QString    m_deviceName;
+    QAudioSink*  m_sink{nullptr};
+    QIODevice*   m_io{nullptr};
+    QString      m_deviceName;
 };
 
 } // namespace AetherSDR

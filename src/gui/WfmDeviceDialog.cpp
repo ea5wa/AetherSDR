@@ -1,129 +1,85 @@
-#include "WfmDeviceDialog.h"
-
+#include "gui/WfmDeviceDialog.h"
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QListWidget>
+#include <QMediaDevices>
 #include <QPushButton>
 #include <QVBoxLayout>
 
-#ifdef Q_OS_WIN
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <mmsystem.h>
-#endif
-
 namespace AetherSDR {
-
-// Keywords that identify virtual audio cable (VAC) devices.
-// A device is shown if its name contains ANY of these (case-insensitive).
-static const QStringList kVacKeywords = {
-    "cable",        // VB-Audio Virtual Cable, VB-Audio Hi-Fi Cable, Virtual Audio Cable
-    "virtual",      // Virtual Audio Cable (Muzychenko), various others
-    "vb-audio",     // VB-Audio branding
-    "voicemeeter",  // VB-Audio Voicemeeter family
-    "dante",        // Audinate Dante Virtual Soundcard
-    "loopback",     // Loopback (Rogue Amoeba), others
-    "jack",         // JACK Audio Connection Kit
-    "blackhole",    // BlackHole (macOS)
-    "soundflower",  // Soundflower (macOS)
-};
-
-static bool isVacDevice(const QString& name)
-{
-    const QString lower = name.toLower();
-    for (const QString& kw : kVacKeywords) {
-        if (lower.contains(kw))
-            return true;
-    }
-    return false;
-}
 
 WfmDeviceDialog::WfmDeviceDialog(QWidget* parent)
     : QDialog(parent)
 {
-    setWindowTitle(tr("WFM Audio Output Device"));
-    setMinimumWidth(400);
+    setWindowTitle(tr("Select WFM Audio Output Device"));
+    setMinimumWidth(420);
 
-    auto* vb = new QVBoxLayout(this);
-    vb->setSpacing(10);
-    vb->setContentsMargins(16, 16, 16, 12);
+    auto* layout = new QVBoxLayout(this);
 
-    auto* lbl = new QLabel(
-        tr("Select the virtual audio cable (VAC) to receive the WFM demodulated audio.\n"
-           "Install VB-Audio Virtual Cable or similar if no device appears below."),
-        this);
-    lbl->setWordWrap(true);
-    vb->addWidget(lbl);
+    auto* label = new QLabel(
+        tr("Choose the audio output device for the WFM demodulator.\n"
+           "Select a Virtual Audio Cable (e.g. Hi-Fi Cable Input, BlackHole,\n"
+           "PipeWire null-sink) to feed another application."), this);
+    label->setWordWrap(true);
+    layout->addWidget(label);
 
     m_list = new QListWidget(this);
     m_list->setAlternatingRowColors(true);
+    layout->addWidget(m_list);
 
-    const QStringList devices = enumerateDevices();
-    for (const QString& name : devices)
-        m_list->addItem(name);
+    m_rememberCheck = new QCheckBox(tr("Remember this choice"), this);
+    m_rememberCheck->setChecked(true);
+    layout->addWidget(m_rememberCheck);
 
-    if (m_list->count() == 0) {
-        auto* noDevLbl = new QLabel(
-            tr("<i>No virtual audio cable found.<br>"
-               "Install <b>VB-Audio Virtual Cable</b> and restart AetherSDR.</i>"),
-            this);
-        noDevLbl->setWordWrap(true);
-        vb->addWidget(noDevLbl);
-    } else {
-        m_list->setCurrentRow(0);
-    }
-
-    vb->addWidget(m_list);
-
-    m_remember = new QCheckBox(tr("Remember this choice"), this);
-    m_remember->setChecked(true);
-    vb->addWidget(m_remember);
-
-    auto* btns = new QDialogButtonBox(
+    m_buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    btns->button(QDialogButtonBox::Ok)->setEnabled(m_list->count() > 0);
-    connect(btns, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    connect(m_list, &QListWidget::itemSelectionChanged, this, [btns, this]() {
-        btns->button(QDialogButtonBox::Ok)->setEnabled(m_list->currentItem() != nullptr);
-    });
-    vb->addWidget(btns);
+    m_buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+    layout->addWidget(m_buttons);
 
-    // Double-click confirms
-    connect(m_list, &QListWidget::itemDoubleClicked, this, &QDialog::accept);
+    connect(m_list, &QListWidget::itemSelectionChanged, this, [this]() {
+        m_buttons->button(QDialogButtonBox::Ok)
+            ->setEnabled(!m_list->selectedItems().isEmpty());
+    });
+    connect(m_list, &QListWidget::itemDoubleClicked,
+            this, &QDialog::accept);
+    connect(m_buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+    populate();
 }
 
-QString WfmDeviceDialog::selectedDevice() const
+void WfmDeviceDialog::populate()
 {
-    auto* item = m_list->currentItem();
-    return item ? item->text() : QString();
+    m_list->clear();
+    m_devices = QMediaDevices::audioOutputs();
+    for (const QAudioDevice& dev : m_devices) {
+        auto* item = new QListWidgetItem(dev.description(), m_list);
+        item->setData(Qt::UserRole, QString::fromUtf8(dev.id()));
+    }
+    if (m_list->count() > 0)
+        m_list->setCurrentRow(0);
+}
+
+QString WfmDeviceDialog::selectedDeviceId() const
+{
+    const auto items = m_list->selectedItems();
+    if (items.isEmpty())
+        return {};
+    return items.first()->data(Qt::UserRole).toString();
+}
+
+QString WfmDeviceDialog::selectedDeviceName() const
+{
+    const auto items = m_list->selectedItems();
+    if (items.isEmpty())
+        return {};
+    return items.first()->text();
 }
 
 bool WfmDeviceDialog::rememberChoice() const
 {
-    return m_remember->isChecked();
-}
-
-// static
-QStringList WfmDeviceDialog::enumerateDevices()
-{
-    QStringList devices;
-
-#ifdef Q_OS_WIN
-    const UINT count = waveOutGetNumDevs();
-    for (UINT i = 0; i < count; ++i) {
-        WAVEOUTCAPSW caps{};
-        if (waveOutGetDevCapsW(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR) {
-            const QString name = QString::fromWCharArray(caps.szPname);
-            if (isVacDevice(name))
-                devices << name;
-        }
-    }
-#endif
-
-    return devices;
+    return m_rememberCheck->isChecked();
 }
 
 } // namespace AetherSDR
