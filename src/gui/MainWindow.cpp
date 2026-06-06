@@ -3467,6 +3467,7 @@ MainWindow::MainWindow(QWidget* parent)
     // ── Title bar: Pan Follow ────────────────────────────────────────────────
     connect(m_titleBar, &TitleBar::panFollowToggled,
             this, &MainWindow::setPanFollow);
+    if (m_titleBar->isPanFollowChecked()) setPanFollow(true);
 
     // ── Title bar: PC Audio, master volume, headphone volume ────────────────
     // The remote_audio_rx stream controls the radio's audio routing:
@@ -19135,26 +19136,47 @@ void MainWindow::onSpectrumReadyForSHistory(quint32 streamId, const QVector<floa
 void MainWindow::setPanFollow(bool on)
 {
     disconnect(m_panFollowConn);
+    disconnect(m_panFollowSliceConn);
+
     if (!on) return;
 
-    auto* s = m_radioModel.slice(0);
-    if (!s) return;
+    // Re-attach helper: wires frequency tracking to whichever slice 0
+    // is currently live. Called on activation and whenever slice 0 is
+    // recreated (radio reconnect, slice re-assignment, etc.).
+    auto attachToSlice0 = [this]() {
+        disconnect(m_panFollowConn);
 
-    auto centerPan = [this, s]() {
-        const QString panId = s->panId();
-        if (panId.isEmpty()) return;
-        const double freq = s->frequency();
-        auto* pan = m_radioModel.panadapter(panId);
-        if (pan && qFuzzyCompare(pan->centerMhz(), freq)) return;
-        const QString freqStr = QString::number(freq, 'f', 6);
-        if (pan) pan->applyPanStatus({{"center", freqStr}});
-        m_radioModel.sendCommand(
-            QString("display pan set %1 center=%2").arg(panId, freqStr));
+        auto* s = m_radioModel.slice(0);
+        if (!s) {
+            // No slice yet — uncheck the button so UI matches reality.
+            if (m_titleBar) m_titleBar->setPanFollowChecked(false);
+            return;
+        }
+
+        auto centerPan = [this, s]() {
+            const QString panId = s->panId();
+            if (panId.isEmpty()) return;
+            const double freq = s->frequency();
+            auto* pan = m_radioModel.panadapter(panId);
+            if (pan && qFuzzyCompare(pan->centerMhz(), freq)) return;
+            const QString freqStr = QString::number(freq, 'f', 6);
+            if (pan) pan->applyPanStatus({{"center", freqStr}});
+            m_radioModel.sendCommand(
+                QString("display pan set %1 center=%2").arg(panId, freqStr));
+        };
+
+        centerPan();
+        m_panFollowConn = connect(s, &SliceModel::frequencyChanged,
+                                  this, [centerPan](double) { centerPan(); });
     };
 
-    centerPan();
-    m_panFollowConn = connect(s, &SliceModel::frequencyChanged,
-                              this, [centerPan](double) { centerPan(); });
+    attachToSlice0();
+
+    // Re-attach whenever a new slice 0 appears (reconnect / re-assignment).
+    m_panFollowSliceConn = connect(&m_radioModel, &RadioModel::sliceAdded,
+        this, [this, attachToSlice0](SliceModel* s) {
+            if (s && s->sliceId() == 0) attachToSlice0();
+        });
 }
 
 } // namespace AetherSDR

@@ -53,6 +53,8 @@ public:
 
 signals:
     void panFollowToggled(bool on);
+    bool isPanFollowChecked() const { return m_panFollowBtn && m_panFollowBtn->isChecked(); }
+    void setPanFollowChecked(bool on) { if (m_panFollowBtn) { QSignalBlocker b(m_panFollowBtn); m_panFollowBtn->setChecked(on); } }
     void pcAudioToggled(bool on);
     void masterVolumeChanged(int pct);
     void headphoneVolumeChanged(int pct);
