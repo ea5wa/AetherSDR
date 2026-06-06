@@ -11,6 +11,7 @@
 #include <QMouseEvent>
 #include <QPointer>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSlider>
 #include <QLabel>
@@ -489,6 +490,18 @@ void TitleBar::markDragHandle(QWidget* widget)
 bool TitleBar::isDragHandle(QObject* obj) const
 {
     return obj && obj->property(kTitleDragHandleProperty).toBool();
+}
+
+bool TitleBar::isPanFollowChecked() const
+{
+    return m_panFollowBtn && m_panFollowBtn->isChecked();
+}
+
+void TitleBar::setPanFollowChecked(bool on)
+{
+    if (!m_panFollowBtn) return;
+    QSignalBlocker block(m_panFollowBtn);
+    m_panFollowBtn->setChecked(on);
 }
 
 bool TitleBar::isSystemMoveAreaAt(const QPoint& globalPos) const
