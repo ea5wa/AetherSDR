@@ -1,15 +1,8 @@
 #include "WaveOutWriter.h"
-#include <QFile>
 #include <QTextStream>
 #include <algorithm>
 #include <cstring>
 
-static void wfmLog(const QString& msg)
-{
-    QFile f("C:/Users/reigc/wfm_debug.txt");
-    if (f.open(QIODevice::Append | QIODevice::Text))
-        QTextStream(&f) << msg << "\n";
-}
 
 namespace AetherSDR {
 
@@ -44,13 +37,13 @@ bool WaveOutWriter::open(const QString& deviceNameFragment, int sampleRate,
                 }
             }
         }
-        wfmLog(QString("WaveOutWriter::open looking for '%1' among %2 devices:\n%3")
-               .arg(deviceNameFragment).arg(numDevs).arg(allDevs.trimmed()));
+        qDebug().noquote() << QString("WaveOutWriter::open looking for '%1' among %2 devices:\n%3")
+               .arg(deviceNameFragment).arg(numDevs).arg(allDevs.trimmed());
     }
     // Fail explicitly if the named device wasn't found — don't fall back to
     // WAVE_MAPPER (which would silently route audio to the default speakers).
     if (!deviceNameFragment.isEmpty() && m_deviceName.isEmpty()) {
-        wfmLog(QString("WaveOutWriter::open: '%1' not found — aborting").arg(deviceNameFragment));
+        qDebug().noquote() << QString("WaveOutWriter::open: '%1' not found — aborting").arg(deviceNameFragment);
         return false;
     }
     if (m_deviceName.isEmpty())
@@ -71,7 +64,7 @@ bool WaveOutWriter::open(const QString& deviceNameFragment, int sampleRate,
                                      reinterpret_cast<DWORD_PTR>(m_refillEvent),
                                      0, CALLBACK_EVENT);
     if (res != MMSYSERR_NOERROR) {
-        wfmLog(QString("waveOutOpen failed: %1").arg(res));
+        qDebug().noquote() << QString("waveOutOpen failed: %1").arg(res);
         CloseHandle(m_refillEvent);
         m_refillEvent = nullptr;
         m_hWaveOut    = nullptr;
@@ -96,8 +89,8 @@ bool WaveOutWriter::open(const QString& deviceNameFragment, int sampleRate,
     m_refillThread = CreateThread(NULL, 0, refillThreadProc, this, 0, NULL);
     SetThreadPriority(m_refillThread, THREAD_PRIORITY_ABOVE_NORMAL);
 
-    wfmLog(QString("WaveOutWriter opened: device='%1' rate=%2 ch=%3 bits=%4 bufBytes=%5")
-           .arg(m_deviceName).arg(sampleRate).arg(channels).arg(bitsPerSample).arg(m_bytesPerBuf));
+    qDebug().noquote() << QString("WaveOutWriter opened: device='%1' rate=%2 ch=%3 bits=%4 bufBytes=%5")
+           .arg(m_deviceName).arg(sampleRate).arg(channels).arg(bitsPerSample).arg(m_bytesPerBuf);
     return true;
 }
 
@@ -125,7 +118,7 @@ void WaveOutWriter::close()
     }
 
     m_pending.clear();
-    wfmLog("WaveOutWriter closed");
+    qDebug().noquote() << "WaveOutWriter closed";
 }
 
 void WaveOutWriter::write(const QByteArray& pcm)

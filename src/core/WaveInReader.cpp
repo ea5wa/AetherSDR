@@ -1,14 +1,7 @@
 #include "WaveInReader.h"
-#include <QFile>
 #include <QTextStream>
 #include <cstring>
 
-static void wfmLog(const QString& msg)
-{
-    QFile f("C:/Users/reigc/wfm_debug.txt");
-    if (f.open(QIODevice::Append | QIODevice::Text))
-        QTextStream(&f) << msg << "\n";
-}
 
 namespace AetherSDR {
 
@@ -42,12 +35,12 @@ bool WaveInReader::open(const QString& deviceNameFragment, int sampleRate,
                 }
             }
         }
-        wfmLog(QString("WaveInReader::open looking for '%1' among %2 waveIn devices:\n%3")
-               .arg(deviceNameFragment).arg(numDevs).arg(allDevs.trimmed()));
+        qDebug().noquote() << QString("WaveInReader::open looking for '%1' among %2 waveIn devices:\n%3")
+               .arg(deviceNameFragment).arg(numDevs).arg(allDevs.trimmed());
     }
 
     if (!deviceNameFragment.isEmpty() && m_deviceName.isEmpty()) {
-        wfmLog(QString("WaveInReader::open: '%1' not found — aborting").arg(deviceNameFragment));
+        qDebug().noquote() << QString("WaveInReader::open: '%1' not found — aborting").arg(deviceNameFragment);
         return false;
     }
     if (m_deviceName.isEmpty())
@@ -67,7 +60,7 @@ bool WaveInReader::open(const QString& deviceNameFragment, int sampleRate,
                                     reinterpret_cast<DWORD_PTR>(m_captureEvent),
                                     0, CALLBACK_EVENT);
     if (res != MMSYSERR_NOERROR) {
-        wfmLog(QString("waveInOpen failed: %1").arg(res));
+        qDebug().noquote() << QString("waveInOpen failed: %1").arg(res);
         CloseHandle(m_captureEvent);
         m_captureEvent = nullptr;
         m_hWaveIn      = nullptr;
@@ -91,8 +84,8 @@ bool WaveInReader::open(const QString& deviceNameFragment, int sampleRate,
 
     waveInStart(m_hWaveIn);
 
-    wfmLog(QString("WaveInReader opened: device='%1' rate=%2 ch=%3 bits=%4")
-           .arg(m_deviceName).arg(sampleRate).arg(channels).arg(bitsPerSample));
+    qDebug().noquote() << QString("WaveInReader opened: device='%1' rate=%2 ch=%3 bits=%4")
+           .arg(m_deviceName).arg(sampleRate).arg(channels).arg(bitsPerSample);
     return true;
 }
 
@@ -119,7 +112,7 @@ void WaveInReader::close()
         CloseHandle(m_captureEvent);
         m_captureEvent = nullptr;
     }
-    wfmLog("WaveInReader closed");
+    qDebug().noquote() << "WaveInReader closed";
 }
 
 // static
