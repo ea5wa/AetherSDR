@@ -1,5 +1,6 @@
 #include "TitleBar.h"
 #include "GuardedSlider.h"
+#include "TitleBarSettings.h"
 #include "core/AppSettings.h"
 
 #include <QFrame>
@@ -220,11 +221,13 @@ TitleBar::TitleBar(QWidget* parent)
     // ── PC Audio + Master Vol + HP Vol ──────────────────────────────────────
     auto& s = AppSettings::instance();
 
-    // Pan Follow toggle — keeps the panadapter centered on Slice A frequency
+    // Pan Follow toggle — keeps the panadapter centered on Slice A frequency.
+    // Persistence is the nested "TitleBar" blob (Principle V); the legacy
+    // flat "PanLockEnabled" key is migrated into it on first read.
+    TitleBarSettings::migrateLegacy();
     m_panFollowBtn = new QPushButton("Pan Lock");
     m_panFollowBtn->setCheckable(true);
-    bool panLockOn = s.value("PanLockEnabled", "False").toString() == "True";
-    m_panFollowBtn->setChecked(panLockOn);
+    m_panFollowBtn->setChecked(TitleBarSettings::panLockEnabled());
     m_panFollowBtn->setFixedHeight(22);
     m_panFollowBtn->setFixedWidth(70);
     m_panFollowBtn->setAccessibleName("Pan follow slice");
@@ -244,9 +247,7 @@ TitleBar::TitleBar(QWidget* parent)
 
     connect(m_panFollowBtn, &QPushButton::toggled, this, [this, updatePanFollowStyle](bool on) {
         updatePanFollowStyle();
-        auto& ss = AppSettings::instance();
-        ss.setValue("PanLockEnabled", on ? "True" : "False");
-        ss.save();
+        TitleBarSettings::setPanLockEnabled(on);
         emit panFollowToggled(on);
     });
     m_hbox->addWidget(m_panFollowBtn);
