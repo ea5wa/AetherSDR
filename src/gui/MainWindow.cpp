@@ -3995,8 +3995,10 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::handleFlexControlButton);
     connect(m_flexControl, &FlexControlManager::buttonPressed,
             this, [this](int button, int action) {
+#ifdef HAVE_HIDAPI
         if (m_hidEncoder->isTMate2())
             noteTMate2Interaction();
+#endif
         if (m_flexControlDialog)
             m_flexControlDialog->reflectButtonPress(button, action);
     });
@@ -7831,7 +7833,9 @@ void MainWindow::applyFlexControlWheelAction(const QString& actionId, int steps)
         if (auto* s = activeSlice()) {
             const int hz = std::clamp(s->ritFreq() + steps * 10, -9999, 9999);
             s->setRit(true, hz);
+#ifdef HAVE_HIDAPI
             triggerTMate2Overlay(TMate2Overlay::Rit, hz);
+#endif
         }
     } else if (actionId == "WheelXit") {
         if (auto* s = activeSlice()) {
@@ -7848,13 +7852,17 @@ void MainWindow::applyFlexControlWheelAction(const QString& actionId, int steps)
         if (m_titleBar)
             m_titleBar->setMasterVolume(next);
         applyMasterVolume(next);
+#ifdef HAVE_HIDAPI
         triggerTMate2Overlay(TMate2Overlay::Volume, next);
+#endif
     } else if (actionId == "WheelHeadphoneVolume") {
         const int next = std::clamp(m_radioModel.headphoneGain() + steps * 2, 0, 100);
         if (m_titleBar)
             m_titleBar->setHeadphoneVolume(next);
         m_radioModel.setHeadphoneGain(next);
+#ifdef HAVE_HIDAPI
         triggerTMate2Overlay(TMate2Overlay::Volume, next);
+#endif
     } else if (actionId == "WheelAgcT") {
         if (auto* s = activeSlice())
             s->setAgcThreshold(std::clamp(s->agcThreshold() + steps, 0, 100));
@@ -7877,12 +7885,16 @@ void MainWindow::applyFlexControlWheelAction(const QString& actionId, int steps)
         auto& tx = m_radioModel.transmitModel();
         const int next = std::clamp(tx.rfPower() + steps, 0, 100);
         tx.setRfPower(next);
+#ifdef HAVE_HIDAPI
         triggerTMate2Overlay(TMate2Overlay::Power, next);
+#endif
     } else if (actionId == "WheelCwSpeed") {
         auto& tx = m_radioModel.transmitModel();
         const int next = std::clamp(tx.cwSpeed() + steps, 5, 100);
         tx.setCwSpeed(next);
+#ifdef HAVE_HIDAPI
         triggerTMate2Overlay(TMate2Overlay::Wpm, next);
+#endif
     }
 }
 

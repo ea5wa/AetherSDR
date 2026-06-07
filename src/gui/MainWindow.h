@@ -121,6 +121,7 @@ class PipeWireAudioBridge;
 using DaxBridge = PipeWireAudioBridge;
 #endif
 class VfoWidget;
+class WfmDemodulator;
 
 // Wheel mode for FlexControl: determines what the encoder knob adjusts.
 //
