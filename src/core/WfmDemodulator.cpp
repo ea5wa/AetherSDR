@@ -9,53 +9,114 @@
 
 namespace AetherSDR {
 
-// Try to find a QAudioDevice whose description contains any of the given
-// substrings (case-insensitive).  Returns a null device if not found.
+// ---------------------------------------------------------------------------
+// FIR low-pass coefficients  — buildFirLP()
+//
+// Specification
+//   fs            = 48 000 Hz
+//   fc            = 20 000 Hz  (midpoint of 18 kHz passband / 22 kHz stopband)
+//   order         = 94  →  95 taps  (kFirTaps = kFirOrder + 1)
+//   window        = Hamming  → stopband attenuation ≥ 53 dB, stopband edge ≈ 22 kHz
+//   phase         = linear (Type-I: odd taps, symmetric h[n] = h[N-1-n])
+//   DC gain       = 1.0  (Σ h[n] normalised → no DC notch, no high-pass artifact)
+//
+// Formula
+//   t    = n − M/2        (time index centred at M/2, where M = kFirOrder = 94)
+//   sinc = sin(π·2·fc·t) / (π·2·fc·t),   sinc(0) = 1
+//   win  = 0.54 − 0.46·cos(2π·n / M)     (Hamming window)
+//   h[n] = sinc · win
+//   normalise so Σ h[n] = 1
+//
+// Symmetry check: t(n) = −t(N−1−n) → sinc and win are both symmetric around n=M/2
+//   ⟹ h[n] = h[N−1−n]  ✓
+// ---------------------------------------------------------------------------
+static std::array<float, WfmDemodulator::kFirTaps> buildFirLP()
+{
+    constexpr int   M  = WfmDemodulator::kFirOrder;   // 94
+    constexpr float fc = static_cast<float>(WfmDemodulator::LP_CUTOFF)
+                       / static_cast<float>(WfmDemodulator::IQ_RATE); // 20000/48000
+    const float pi = static_cast<float>(M_PI);
+
+    std::array<float, WfmDemodulator::kFirTaps> h{};
+    float sum = 0.0f;
+
+    for (int n = 0; n <= M; ++n) {
+        const float t = static_cast<float>(n) - static_cast<float>(M) * 0.5f;
+
+        // Ideal low-pass impulse response (sinc)
+        float sinc;
+        if (std::abs(t) < 1e-7f) {
+            sinc = 1.0f;
+        } else {
+            const float x = 2.0f * fc * pi * t;   // π · 2fc · t
+            sinc = std::sin(x) / x;
+        }
+
+        // Hamming window: w[n] = 0.54 − 0.46·cos(2π·n/M)
+        const float win = 0.54f
+                        - 0.46f * std::cos(2.0f * pi * static_cast<float>(n)
+                                                      / static_cast<float>(M));
+
+        h[n] = sinc * win;
+        sum += h[n];
+    }
+
+    // Normalise to unity DC gain: Σ h[n] = 1  →  no DC notch
+    for (float& v : h) v /= sum;
+
+    return h;
+}
+
+// Computed once at program start; const so it lives in .rodata
+static const std::array<float, WfmDemodulator::kFirTaps> kFirLP = buildFirLP();
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 static QAudioDevice findCaptureDevice(const QStringList& hints)
 {
     const auto inputs = QMediaDevices::audioInputs();
     for (const QAudioDevice& dev : inputs) {
         const QString desc = dev.description().toLower();
-        for (const QString& h : hints) {
-            if (desc.contains(h.toLower()))
-                return dev;
-        }
+        for (const QString& h : hints)
+            if (desc.contains(h.toLower())) return dev;
     }
     return {};
 }
 
-WfmDemodulator::WfmDemodulator(QObject* parent)
-    : QObject(parent)
-{}
+// ---------------------------------------------------------------------------
+// WfmDemodulator — lifecycle
+// ---------------------------------------------------------------------------
 
-WfmDemodulator::~WfmDemodulator()
-{
-    stop();
-}
+WfmDemodulator::WfmDemodulator(QObject* parent) : QObject(parent) {}
+
+WfmDemodulator::~WfmDemodulator() { stop(); }
 
 void WfmDemodulator::start(DaxIqModel* daxIq, const QString& deviceId,
                            const QString& panId, float freqOffsetHz)
 {
     if (m_active) stop();
 
-    m_daxIq   = daxIq;
-    m_prevI   = 0.0f;
-    m_prevQ   = 0.0f;
-    m_corrCos = 1.0f;
-    m_corrSin = 0.0f;
-    m_panId   = panId;
-    m_panSent = false;
+    m_daxIq           = daxIq;
+    m_prevI           = 0.0f;
+    m_prevQ           = 0.0f;
+    m_corrCos         = 1.0f;
+    m_corrSin         = 0.0f;
+    m_panId           = panId;
+    m_panSent         = false;
     m_usingDaxCapture = false;
+    m_firBuf.fill(0.0f);
+    m_firIdx  = 0;
+    m_deemph1 = 0.0f;
+    m_deemph2 = 0.0f;
 
-    qCDebug(lcAudio) << "WfmDemodulator::start deviceId=" << deviceId
-                     << "freqOffsetHz=" << freqOffsetHz;
+    qCDebug(lcAudio) << "WfmDemodulator::start device=" << deviceId
+                     << "freqOffset=" << freqOffsetHz;
 
-    // Primary path: read IQ from SmartSDR DAX audio capture device.
-    // DAX delivers IQ as stereo PCM: L=I, R=Q.
-    // Device names vary by DAX version; try several substrings.
-    const QStringList daxHints = {
-        "dax iq rx 1", "dax iq 1", "dax reserved iq rx 1", "dax iq"
-    };
+    // --- Primary path: SmartSDR DAX IQ capture device (Windows) ---
+    const QStringList daxHints = { "dax iq rx 1", "dax iq 1",
+                                   "dax reserved iq rx 1", "dax iq" };
     QAudioDevice capDev = findCaptureDevice(daxHints);
 
     if (!capDev.isNull()) {
@@ -66,78 +127,64 @@ void WfmDemodulator::start(DaxIqModel* daxIq, const QString& deviceId,
         if (!capDev.isFormatSupported(fmt))
             fmt = capDev.preferredFormat();
 
-        // Use the actual IQ sample rate for frequency correction and audio output.
-        const int actualIqRate = fmt.sampleRate();
-        const float step = -2.0f * static_cast<float>(M_PI) * freqOffsetHz / actualIqRate;
+        const int rate = fmt.sampleRate();
+        m_actualIqRate = rate;
+
+        const float step = -2.0f * static_cast<float>(M_PI) * freqOffsetHz / rate;
         m_corrCosStep = std::cos(step);
         m_corrSinStep = std::sin(step);
-        m_corrCos = 1.0f;
-        m_corrSin = 0.0f;
-        m_prevI = 0.0f;
-        m_prevQ = 0.0f;
 
-        qCInfo(lcAudio) << "WfmDemodulator: DAX IQ format:"
-                        << capDev.description()
-                        << "rate=" << actualIqRate
-                        << "ch="  << fmt.channelCount()
+        qCInfo(lcAudio) << "WfmDemodulator: DAX device=" << capDev.description()
+                        << "rate=" << rate
+                        << "ch=" << fmt.channelCount()
                         << "fmt=" << fmt.sampleFormat();
 
-        // Open audio output at the same rate as the IQ capture.
         m_waveOut = new WaveOutWriter(this);
-        if (!m_waveOut->open(deviceId, actualIqRate, 2)) {
-            qCDebug(lcAudio) << "WfmDemodulator: failed to open audio output:" << deviceId;
-            delete m_waveOut;
-            m_waveOut = nullptr;
+        if (!m_waveOut->open(deviceId, rate, 2)) {
+            qCWarning(lcAudio) << "WfmDemodulator: cannot open audio output" << deviceId;
+            delete m_waveOut; m_waveOut = nullptr;
             return;
         }
 
         m_iqDevice = new DaxIqCaptureDevice(this);
         m_iqDevice->open(QIODevice::WriteOnly);
         connect(m_iqDevice, &DaxIqCaptureDevice::pcmReady,
-                this, &WfmDemodulator::onDaxIqPcm);
+                this,       &WfmDemodulator::onDaxIqPcm);
 
         m_iqSource = new QAudioSource(capDev, fmt, this);
         m_iqSource->start(m_iqDevice);
 
         if (m_iqSource->error() == QAudio::NoError) {
             m_usingDaxCapture = true;
-            qCInfo(lcAudio) << "WfmDemodulator: DAX capture active, audio out at"
-                            << actualIqRate << "Hz";
+            qCInfo(lcAudio) << "WfmDemodulator: DAX capture active at" << rate << "Hz";
         } else {
-            qCDebug(lcAudio) << "WfmDemodulator: DAX capture failed, error="
-                             << m_iqSource->error() << "— falling back to VITA-49";
+            qCWarning(lcAudio) << "WfmDemodulator: DAX capture failed, error="
+                               << m_iqSource->error() << "→ fallback VITA-49";
             m_iqSource->stop();
             delete m_iqSource;  m_iqSource = nullptr;
             delete m_iqDevice;  m_iqDevice = nullptr;
         }
     } else {
-        qCDebug(lcAudio) << "WfmDemodulator: no DAX IQ capture device found";
+        qCDebug(lcAudio) << "WfmDemodulator: DAX device not found";
     }
 
-    // Fallback: VITA-49 DaxIqModel path (Linux / macOS, or if DAX not running).
+    // --- Fallback: VITA-49 DaxIqModel (Linux/macOS, or no DAX) ---
     if (!m_usingDaxCapture) {
         const float step = -2.0f * static_cast<float>(M_PI) * freqOffsetHz / IQ_RATE;
-        m_corrCosStep = std::cos(step);
-        m_corrSinStep = std::sin(step);
-        m_corrCos = 1.0f;
-        m_corrSin = 0.0f;
-        m_prevI = 0.0f;
-        m_prevQ = 0.0f;
+        m_corrCosStep  = std::cos(step);
+        m_corrSinStep  = std::sin(step);
+        m_actualIqRate = IQ_RATE;
 
         m_waveOut = new WaveOutWriter(this);
         if (!m_waveOut->open(deviceId, AUDIO_RATE, 2)) {
-            qCDebug(lcAudio) << "WfmDemodulator: failed to open audio output:" << deviceId;
-            delete m_waveOut;
-            m_waveOut = nullptr;
+            qCWarning(lcAudio) << "WfmDemodulator: cannot open audio output" << deviceId;
+            delete m_waveOut; m_waveOut = nullptr;
             return;
         }
-
-        connect(m_daxIq, &DaxIqModel::iqSamplesReady,
-                this, &WfmDemodulator::onIqSamples);
-        connect(m_daxIq, &DaxIqModel::streamChanged,
-                this, &WfmDemodulator::onStreamChanged);
+        connect(m_daxIq, &DaxIqModel::iqSamplesReady, this, &WfmDemodulator::onIqSamples);
+        connect(m_daxIq, &DaxIqModel::streamChanged,  this, &WfmDemodulator::onStreamChanged);
         m_daxIq->createStream(DAX_CHANNEL);
-        qCDebug(lcAudio) << "WfmDemodulator: using VITA-49 fallback, panId=" << m_panId;
+        qCDebug(lcAudio) << "WfmDemodulator: VITA-49 fallback, panId=" << m_panId;
     }
 
     m_active = true;
@@ -148,34 +195,23 @@ void WfmDemodulator::stop()
     if (!m_active) return;
     m_active = false;
 
-    if (m_iqSource) {
-        m_iqSource->stop();
-        delete m_iqSource;
-        m_iqSource = nullptr;
-    }
-    if (m_iqDevice) {
-        m_iqDevice->close();
-        delete m_iqDevice;
-        m_iqDevice = nullptr;
-    }
+    if (m_iqSource) { m_iqSource->stop(); delete m_iqSource; m_iqSource = nullptr; }
+    if (m_iqDevice) { m_iqDevice->close(); delete m_iqDevice; m_iqDevice = nullptr; }
     if (m_daxIq) {
-        if (!m_usingDaxCapture)
-            m_daxIq->removeStream(DAX_CHANNEL);
+        if (!m_usingDaxCapture) m_daxIq->removeStream(DAX_CHANNEL);
         disconnect(m_daxIq, nullptr, this, nullptr);
         m_daxIq = nullptr;
     }
-    if (m_waveOut) {
-        m_waveOut->close();
-        delete m_waveOut;
-        m_waveOut = nullptr;
-    }
+    if (m_waveOut) { m_waveOut->close(); delete m_waveOut; m_waveOut = nullptr; }
 }
+
+// ---------------------------------------------------------------------------
+// Slot handlers
+// ---------------------------------------------------------------------------
 
 void WfmDemodulator::onStreamChanged(int channel)
 {
     const auto& s = m_daxIq->stream(DAX_CHANNEL);
-    qCDebug(lcAudio) << "WfmDemodulator::onStreamChanged ch=" << channel
-                     << "exists=" << s.exists << "streamId=0x" + QString::number(s.streamId, 16);
     if (channel != DAX_CHANNEL || m_panSent || m_panId.isEmpty()) return;
     if (!s.exists || s.streamId == 0) return;
     const QString cmd = QString("stream set 0x%1 pan=%2")
@@ -185,103 +221,139 @@ void WfmDemodulator::onStreamChanged(int channel)
     m_panSent = true;
 }
 
-void WfmDemodulator::onIqSamples(int channel, QVector<float> iqInterleaved, int /*sampleRate*/)
+void WfmDemodulator::onIqSamples(int channel, QVector<float> iq, int /*rate*/)
 {
     if (channel != DAX_CHANNEL || !m_active || !m_waveOut) return;
-    processIqFloat(iqInterleaved);
+    processIqFloat(iq);
 }
 
-// DAX audio capture: stereo Int16 PCM, L=Q, R=I (FlexRadio convention — swapped vs standard).
 void WfmDemodulator::onDaxIqPcm(const QByteArray& pcm)
 {
     if (!m_active || !m_waveOut) return;
     processIqInt16(pcm);
 }
 
+// ---------------------------------------------------------------------------
+// processIqInt16 — DAX stereo Int16 → float, then processIqFloat
+// ---------------------------------------------------------------------------
+
 void WfmDemodulator::processIqInt16(const QByteArray& pcm)
 {
-    const int numSamples = pcm.size() / (2 * sizeof(qint16));
-    if (numSamples <= 0) return;
-
+    const int n = pcm.size() / (2 * sizeof(qint16));
+    if (n <= 0) return;
     const auto* raw = reinterpret_cast<const qint16*>(pcm.constData());
-    QVector<float> iq(numSamples * 2);
-    for (int i = 0; i < numSamples; ++i) {
-        iq[2 * i]     = raw[2 * i]     / 32768.0f;  // L = I
-        iq[2 * i + 1] = raw[2 * i + 1] / 32768.0f;  // R = Q
+    QVector<float> iq(n * 2);
+    for (int i = 0; i < n; ++i) {
+        iq[2*i]   = raw[2*i]   / 32768.0f;   // L = I
+        iq[2*i+1] = raw[2*i+1] / 32768.0f;   // R = Q
     }
     processIqFloat(iq);
 }
 
-void WfmDemodulator::processIqFloat(const QVector<float>& iqInterleaved)
+// ---------------------------------------------------------------------------
+// processIqFloat — core DSP
+//
+//  Step 1 – Doppler phasor rotation
+//  Step 2 – Phase-difference FM discriminator (+atan2)
+//            atan2 is amplitude-invariant: no IQ normalisation needed.
+//            Output ∈ [−π, π]; divide by π → [−1, 1] (GAIN ≤ 1 = no clip)
+//  Step 3 – FIR low-pass, 97 taps, fc = 20 kHz, Hamming, linear phase
+//            Symmetric coefficients, sum = 1, NO DC notch, NO de-emphasis
+//  Step 4 – Volume scale, write Float32 stereo to ring buffer
+// ---------------------------------------------------------------------------
+
+void WfmDemodulator::processIqFloat(const QVector<float>& iq)
 {
-    const int numSamples = iqInterleaved.size() / 2;
+    const int numSamples = iq.size() / 2;
     if (numSamples <= 0) return;
 
-    // Float32 stereo output — universally supported by Qt audio backends.
     QByteArray pcm(numSamples * 2 * sizeof(float), Qt::Uninitialized);
     auto* out = reinterpret_cast<float*>(pcm.data());
 
     float prevI = m_prevI;
     float prevQ = m_prevQ;
 
-    for (int i = 0; i < numSamples; ++i) {
-        float I = iqInterleaved[2 * i];
-        float Q = iqInterleaved[2 * i + 1];
+    // Signal flow (per sample):
+    //   [1] IQ  →  FM discriminator (atan2)
+    //   [2]     →  FIR low-pass 95-tap Hamming, fc=20kHz, h[n]=h[N-1-n]
+    //   [3]     →  normalisation (soft clamp, optional)
+    //   [4]     →  ring buffer → QIODevice → QAudioSink
 
-        // Frequency correction: rotate IQ by the running phasor.
+    const float pi   = static_cast<float>(M_PI);
+    const float norm = GAIN / pi;   // atan2 ∈ [−π,π] / π → [−1,1]; ×GAIN ≤ 1 ⟹ no clip
+
+    for (int i = 0; i < numSamples; ++i) {
+        float I = iq[2*i];
+        float Q = iq[2*i+1];
+
+        // --- Doppler phasor correction ---
         {
             const float Ic = I * m_corrCos - Q * m_corrSin;
             const float Qc = I * m_corrSin + Q * m_corrCos;
             I = Ic; Q = Qc;
-            const float newCos = m_corrCos * m_corrCosStep - m_corrSin * m_corrSinStep;
-            const float newSin = m_corrCos * m_corrSinStep + m_corrSin * m_corrCosStep;
-            m_corrCos = newCos;
-            m_corrSin = newSin;
+            const float nc = m_corrCos * m_corrCosStep - m_corrSin * m_corrSinStep;
+            const float ns = m_corrCos * m_corrSinStep + m_corrSin * m_corrCosStep;
+            m_corrCos = nc;
+            m_corrSin = ns;
         }
 
-        // Normalize to unit circle (limiter/AGC).
-        // This removes the FM noise parabola: without normalization, noise
-        // power rises with f² after FM discrimination. With normalization,
-        // all samples are on the unit circle and noise becomes spectrally flat.
-        // The subsequent de-emphasis then shapes the flat noise floor.
-        const float amp = std::sqrt(I * I + Q * Q);
-        if (amp > 1e-9f) { I /= amp; Q /= amp; }
-        else              { I = prevI; Q = prevQ; }
-
-        // Phase-difference FM discriminator.
+        // [1] FM discriminator — atan2, amplitude-invariant
+        //   cross = Im(conj(prev)·curr) = I·Qprev − Q·Iprev
+        //   dot   = Re(conj(prev)·curr) = I·Iprev + Q·Qprev
+        //   disc  = atan2(cross, dot) / π  ∈ [−1, 1]
         const float cross = I * prevQ - Q * prevI;
         const float dot   = I * prevI + Q * prevQ;
-        float audio = std::clamp(
-            -std::atan2(cross, dot) * (GAIN / static_cast<float>(M_PI)),
-            -1.0f, 1.0f);
+        const float disc  = std::atan2(cross, dot) * norm;
 
         prevI = I;
         prevQ = Q;
 
-        const float s = audio * m_volume;
-        out[i * 2]     = s;
-        out[i * 2 + 1] = s;
+        // [2] FIR low-pass — 95 taps, Hamming, fc=20kHz, h[n]=h[N-1-n], Σh=1
+        //   Circular delay line; newest sample at m_firIdx, then convolve.
+        m_firBuf[m_firIdx] = disc;
+        float lp = 0.0f;
+        for (int k = 0; k < kFirTaps; ++k)
+            lp += kFirLP[k] * m_firBuf[(m_firIdx - k + kFirTaps) % kFirTaps];
+        m_firIdx = (m_firIdx + 1) % kFirTaps;
+
+        // [3] FM noise parabola compensator — 2-pole IIR LPF
+        //   Each pole: y = α·y + β·x  (1st-order LPF, α=0.85, fc≈1.2 kHz)
+        //   Two in cascade: combined response ∝ 1/f² above fc
+        //   f² (FM noise) × 1/f² (compensator) → flat/falling spectrum
+        //   α = exp(−2π×1200/48000) ≈ 0.85
+        static constexpr float kA = 0.80f;   // fc ≈ 1.5 kHz — gentler slope than 0.85
+        static constexpr float kB = 1.0f - kA;
+        m_deemph1 = kA * m_deemph1 + kB * lp;
+        m_deemph2 = kA * m_deemph2 + kB * m_deemph1;
+
+        // [4] Soft clamp + volume
+        const float s = std::clamp(m_deemph2, -1.0f, 1.0f) * m_volume;
+
+        // [4] Stereo Float32 → ring buffer → QIODevice → QAudioSink
+        out[2*i]   = s;
+        out[2*i+1] = s;
     }
 
     m_prevI = prevI;
     m_prevQ = prevQ;
 
-    // Renormalize frequency-correction phasor every block to prevent drift.
-    const float norm = std::sqrt(m_corrCos * m_corrCos + m_corrSin * m_corrSin);
-    if (norm > 1e-9f) { m_corrCos /= norm; m_corrSin /= norm; }
+    // Renormalise phasor every block to prevent drift
+    const float pn = std::sqrt(m_corrCos * m_corrCos + m_corrSin * m_corrSin);
+    if (pn > 1e-9f) { m_corrCos /= pn; m_corrSin /= pn; }
 
-    // Periodic diagnostic (~every 2 s)
+    // Diagnostic log ~every 2 s
     static int s_blk = 0;
     if (++s_blk % 100 == 0) {
-        float iqRms = 0, audioMax = 0;
+        float iqRms = 0.0f, audMax = 0.0f;
         for (int i = 0; i < numSamples; ++i) {
-            const float rI = iqInterleaved[2*i], rQ = iqInterleaved[2*i+1];
+            const float rI = iq[2*i], rQ = iq[2*i+1];
             iqRms += rI*rI + rQ*rQ;
-            if (std::abs(out[i*2]) > audioMax) audioMax = std::abs(out[i*2]);
+            if (std::abs(out[2*i]) > audMax) audMax = std::abs(out[2*i]);
         }
         iqRms = std::sqrt(iqRms / numSamples);
         qCDebug(lcAudio) << "WfmDemodulator blk#" << s_blk
-                         << "IQ_rms=" << iqRms << "audio_max=" << audioMax
+                         << "IQ_rms=" << iqRms
+                         << "audio_max=" << audMax
                          << "path=" << (m_usingDaxCapture ? "dax-capture" : "vita49");
     }
 

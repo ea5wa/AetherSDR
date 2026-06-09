@@ -19138,7 +19138,18 @@ void MainWindow::activateWFM(int sliceId)
     };
     centerPanAtSlice();
     m_wfmFreqConn = connect(s, &SliceModel::frequencyChanged,
-                            this, [centerPanAtSlice](double) { centerPanAtSlice(); });
+                            this, [this, s, centerPanAtSlice](double sliceFreqMhz) {
+        centerPanAtSlice();
+        if (m_wfmDemod) {
+            const QString panId = s->panId();
+            auto* pan = m_radioModel.panadapter(panId);
+            if (pan) {
+                const float offsetHz = static_cast<float>(
+                    (sliceFreqMhz - pan->centerMhz()) * 1e6);
+                m_wfmDemod->setFreqOffsetHz(offsetHz);
+            }
+        }
+    });
 
     m_wfmDemod = new WfmDemodulator(this);
     connect(m_wfmDemod, &WfmDemodulator::commandReady,
