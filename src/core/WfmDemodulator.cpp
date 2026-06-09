@@ -47,24 +47,11 @@ void WfmDemodulator::start(DaxIqModel* daxIq, const QString& deviceId,
     m_panSent = false;
     m_usingDaxCapture = false;
 
-    const float step = -2.0f * static_cast<float>(M_PI) * freqOffsetHz / IQ_RATE;
-    m_corrCosStep = std::cos(step);
-    m_corrSinStep = std::sin(step);
-
     qCDebug(lcAudio) << "WfmDemodulator::start deviceId=" << deviceId
                      << "freqOffsetHz=" << freqOffsetHz;
 
-    // Open output device first.
-    m_waveOut = new WaveOutWriter(this);
-    if (!m_waveOut->open(deviceId, AUDIO_RATE, 2)) {
-        qCDebug(lcAudio) << "WfmDemodulator: failed to open audio output:" << deviceId;
-        delete m_waveOut;
-        m_waveOut = nullptr;
-        return;
-    }
-
     // Primary path: read IQ from SmartSDR DAX audio capture device.
-    // DAX delivers IQ as stereo PCM: L=I, R=Q at IQ_RATE.
+    // DAX delivers IQ as stereo PCM: L=I, R=Q.
     // Device names vary by DAX version; try several substrings.
     const QStringList daxHints = {
         "dax iq rx 1", "dax iq 1", "dax reserved iq rx 1", "dax iq"
@@ -79,6 +66,31 @@ void WfmDemodulator::start(DaxIqModel* daxIq, const QString& deviceId,
         if (!capDev.isFormatSupported(fmt))
             fmt = capDev.preferredFormat();
 
+        // Use the actual IQ sample rate for frequency correction and audio output.
+        const int actualIqRate = fmt.sampleRate();
+        const float step = -2.0f * static_cast<float>(M_PI) * freqOffsetHz / actualIqRate;
+        m_corrCosStep = std::cos(step);
+        m_corrSinStep = std::sin(step);
+        m_corrCos = 1.0f;
+        m_corrSin = 0.0f;
+        m_prevI = 0.0f;
+        m_prevQ = 0.0f;
+
+        qCInfo(lcAudio) << "WfmDemodulator: DAX IQ format:"
+                        << capDev.description()
+                        << "rate=" << actualIqRate
+                        << "ch="  << fmt.channelCount()
+                        << "fmt=" << fmt.sampleFormat();
+
+        // Open audio output at the same rate as the IQ capture.
+        m_waveOut = new WaveOutWriter(this);
+        if (!m_waveOut->open(deviceId, actualIqRate, 2)) {
+            qCDebug(lcAudio) << "WfmDemodulator: failed to open audio output:" << deviceId;
+            delete m_waveOut;
+            m_waveOut = nullptr;
+            return;
+        }
+
         m_iqDevice = new DaxIqCaptureDevice(this);
         m_iqDevice->open(QIODevice::WriteOnly);
         connect(m_iqDevice, &DaxIqCaptureDevice::pcmReady,
@@ -89,10 +101,8 @@ void WfmDemodulator::start(DaxIqModel* daxIq, const QString& deviceId,
 
         if (m_iqSource->error() == QAudio::NoError) {
             m_usingDaxCapture = true;
-            qCDebug(lcAudio) << "WfmDemodulator: DAX capture path:"
-                             << capDev.description()
-                             << "rate=" << fmt.sampleRate()
-                             << "fmt=" << fmt.sampleFormat();
+            qCInfo(lcAudio) << "WfmDemodulator: DAX capture active, audio out at"
+                            << actualIqRate << "Hz";
         } else {
             qCDebug(lcAudio) << "WfmDemodulator: DAX capture failed, error="
                              << m_iqSource->error() << "— falling back to VITA-49";
@@ -106,6 +116,22 @@ void WfmDemodulator::start(DaxIqModel* daxIq, const QString& deviceId,
 
     // Fallback: VITA-49 DaxIqModel path (Linux / macOS, or if DAX not running).
     if (!m_usingDaxCapture) {
+        const float step = -2.0f * static_cast<float>(M_PI) * freqOffsetHz / IQ_RATE;
+        m_corrCosStep = std::cos(step);
+        m_corrSinStep = std::sin(step);
+        m_corrCos = 1.0f;
+        m_corrSin = 0.0f;
+        m_prevI = 0.0f;
+        m_prevQ = 0.0f;
+
+        m_waveOut = new WaveOutWriter(this);
+        if (!m_waveOut->open(deviceId, AUDIO_RATE, 2)) {
+            qCDebug(lcAudio) << "WfmDemodulator: failed to open audio output:" << deviceId;
+            delete m_waveOut;
+            m_waveOut = nullptr;
+            return;
+        }
+
         connect(m_daxIq, &DaxIqModel::iqSamplesReady,
                 this, &WfmDemodulator::onIqSamples);
         connect(m_daxIq, &DaxIqModel::streamChanged,
@@ -165,7 +191,7 @@ void WfmDemodulator::onIqSamples(int channel, QVector<float> iqInterleaved, int 
     processIqFloat(iqInterleaved);
 }
 
-// DAX audio capture: stereo Int16 PCM, L=I, R=Q.
+// DAX audio capture: stereo Int16 PCM, L=Q, R=I (FlexRadio convention — swapped vs standard).
 void WfmDemodulator::onDaxIqPcm(const QByteArray& pcm)
 {
     if (!m_active || !m_waveOut) return;
@@ -213,19 +239,21 @@ void WfmDemodulator::processIqFloat(const QVector<float>& iqInterleaved)
             m_corrSin = newSin;
         }
 
-        // Normalize to unit circle (carrier lock)
+        // Normalize to unit circle (limiter/AGC).
+        // This removes the FM noise parabola: without normalization, noise
+        // power rises with f² after FM discrimination. With normalization,
+        // all samples are on the unit circle and noise becomes spectrally flat.
+        // The subsequent de-emphasis then shapes the flat noise floor.
         const float amp = std::sqrt(I * I + Q * Q);
         if (amp > 1e-9f) { I /= amp; Q /= amp; }
         else              { I = prevI; Q = prevQ; }
 
         // Phase-difference FM discriminator.
-        // Negated to correct spectral inversion introduced by the DAX IQ
-        // channel order (SmartSDR DAX delivers L=I, R=Q with upper-sideband
-        // mixing, which inverts the baseband spectrum).
         const float cross = I * prevQ - Q * prevI;
         const float dot   = I * prevI + Q * prevQ;
-        float audio = -std::atan2(cross, dot) * (GAIN / static_cast<float>(M_PI));
-        audio = std::clamp(audio, -1.0f, 1.0f);
+        float audio = std::clamp(
+            -std::atan2(cross, dot) * (GAIN / static_cast<float>(M_PI)),
+            -1.0f, 1.0f);
 
         prevI = I;
         prevQ = Q;

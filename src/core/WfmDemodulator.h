@@ -45,7 +45,7 @@ public:
     static constexpr int   IQ_RATE     = 48000;
     static constexpr int   AUDIO_RATE  = 48000;
     static constexpr int   FILTER_HZ   = 20000;
-    static constexpr float GAIN        = 1.0f;
+    static constexpr float GAIN        = 0.5f;
 
     explicit WfmDemodulator(QObject* parent = nullptr);
     ~WfmDemodulator() override;
