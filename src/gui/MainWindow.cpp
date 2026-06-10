@@ -19125,6 +19125,9 @@ void MainWindow::activateWFM(int sliceId)
     s->setFilterWidth(-WfmDemodulator::FILTER_HZ, WfmDemodulator::FILTER_HZ);
     m_wfmSliceId = sliceId;
 
+    // Centre the pan (and with it the DAX IQ stream) on the slice — once.
+    // applyPanStatus updates the local model immediately so offsets computed
+    // before the radio echoes the new centre are already correct.
     auto centerPanAtSlice = [this, s]() {
         const QString panId = s->panId();
         if (panId.isEmpty()) return;
@@ -19137,19 +19140,6 @@ void MainWindow::activateWFM(int sliceId)
             QString("display pan set %1 center=%2").arg(panId, freqStr));
     };
     centerPanAtSlice();
-    m_wfmFreqConn = connect(s, &SliceModel::frequencyChanged,
-                            this, [this, s, centerPanAtSlice](double sliceFreqMhz) {
-        centerPanAtSlice();
-        if (m_wfmDemod) {
-            const QString panId = s->panId();
-            auto* pan = m_radioModel.panadapter(panId);
-            if (pan) {
-                const float offsetHz = static_cast<float>(
-                    (sliceFreqMhz - pan->centerMhz()) * 1e6);
-                m_wfmDemod->setFreqOffsetHz(offsetHz);
-            }
-        }
-    });
 
     m_wfmDemod = new WfmDemodulator(this);
     connect(m_wfmDemod, &WfmDemodulator::commandReady,
@@ -19157,13 +19147,34 @@ void MainWindow::activateWFM(int sliceId)
     m_wfmDemod->setVolume(static_cast<int>(s->audioGain()));
     connect(s, &SliceModel::audioGainChanged,
             m_wfmDemod, [demod = m_wfmDemod](float g) { demod->setVolume(static_cast<int>(g)); });
-    m_wfmDemod->start(&m_radioModel.daxIqModel(), audioDeviceId, s->panId(), 0.0f);
+    m_wfmDemod->start(&m_radioModel.daxIqModel(), audioDeviceId, s->panId());
     if (!m_wfmDemod->isActive()) {
         WfmSettings::clearAudioDeviceId();
         delete m_wfmDemod;
         m_wfmDemod = nullptr;
         m_wfmSliceId = -1;
+        return;
     }
+
+    // SkyRoof policy: Doppler rides the demodulator's NCO while the pan (and
+    // the DAX IQ centre) stays put — each retune is phase-continuous, so the
+    // modem never unlocks and the pan is never yanked. Recentre only when the
+    // slice would leave the usable IQ window (rare: at 70 cm the Doppler
+    // swing is ±10 kHz vs a ±14.8 kHz window at 48 k).
+    m_wfmFreqConn = connect(s, &SliceModel::frequencyChanged,
+                            this, [this, s, centerPanAtSlice](double sliceFreqMhz) {
+        if (!m_wfmDemod) return;
+        auto* pan = m_radioModel.panadapter(s->panId());
+        if (!pan) return;
+        const float offsetHz = static_cast<float>(
+            (sliceFreqMhz - pan->centerMhz()) * 1e6);
+        if (qAbs(offsetHz) <= m_wfmDemod->maxFreqOffsetHz()) {
+            m_wfmDemod->setFreqOffsetHz(offsetHz);
+        } else {
+            centerPanAtSlice();
+            m_wfmDemod->setFreqOffsetHz(0.0f);
+        }
+    });
 }
 
 void MainWindow::deactivateWFM()

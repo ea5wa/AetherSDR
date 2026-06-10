@@ -1,16 +1,19 @@
 #pragma once
+#include <QAudioFormat>
 #include <QAudioSource>
 #include <QIODevice>
 #include <QObject>
 #include <QVector>
 #include <QByteArray>
 #include <algorithm>
-#include <array>
+#include <memory>
+#include <vector>
 
 namespace AetherSDR {
 
 class DaxIqModel;
 class WaveOutWriter;
+class WfmDsp;
 
 // ---------------------------------------------------------------------------
 // DaxIqCaptureDevice — QIODevice sink that forwards DAX PCM blocks
@@ -31,53 +34,42 @@ signals:
 };
 
 // ---------------------------------------------------------------------------
-// WfmDemodulator
+// WfmDemodulator — device plumbing around WfmDsp.
 //
-// Signal chain
-//   1. IQ (Int16 stereo from DAX, or float32 from VITA-49)
-//   2. Frequency-correction phasor (Doppler)
-//   3. Phase-difference FM discriminator: +atan2(I·Qp − Q·Ip, I·Ip + Q·Qp) / π
-//      — atan2 is amplitude-invariant; no IQ normalisation needed
-//   4. FIR low-pass, order 96 (97 taps), fc = 20 kHz @ 48 kHz, Hamming window
-//      — symmetric (h[n] = h[N−1−n]), linear phase, sum ≈ 1, no DC notch
-//   5. Volume scale → Float32 stereo → QAudioSink (HiFi Cable / VAC)
+// See WfmDsp.h for the DSP chain and the SkyRoof-parity rationale. This
+// class only owns the I/O:
+//
+//   IQ source (DAX IQ endpoint at its NATIVE rate, or VITA-49 DaxIqModel)
+//     → WfmDsp  (NCO mix-down → exactly 48 kHz → discriminator → FIR)
+//     → clamp + volume → Float32 stereo → WaveOutWriter (HiFi Cable / VAC)
+//
+// Doppler: MainWindow forwards sliceFreq − panCentre via setFreqOffsetHz().
+// The pan — and with it the DAX IQ centre — stays fixed during a pass and
+// is recentred only when the slice would leave the usable IQ window
+// (maxFreqOffsetHz()), mirroring SkyRoof's fixed-SDR-centre + NCO design.
 // ---------------------------------------------------------------------------
 class WfmDemodulator : public QObject
 {
     Q_OBJECT
 public:
-    static constexpr int   DAX_CHANNEL = 1;
-    static constexpr int   IQ_RATE     = 48000;
-    static constexpr int   AUDIO_RATE  = 48000;
-    // FIR low-pass design parameters
-    //   fs       = 48 000 Hz
-    //   fc       = 20 000 Hz  (midpoint of transition band 18–22 kHz)
-    //   order    = 94  →  95 taps  (Type-I symmetric, h[n]=h[N-1-n])
-    //   window   = Hamming  (stopband ≥ 53 dB, stopband edge ≈ 22 kHz)
-    static constexpr int   LP_CUTOFF   = 20000;  // FIR fc, Hz
-    static constexpr int   FILTER_HZ   = 20000;  // alias used by MainWindow
-    static constexpr float GAIN        = 3.0f;   // G3RUH peak ≈ ±0.2×3 = ±0.6 → no clip
-
-    static constexpr int kFirOrder = 94;          // even order → odd taps → Type-I
-    static constexpr int kFirTaps  = kFirOrder + 1;  // 95
+    static constexpr int DAX_CHANNEL = 1;
+    static constexpr int AUDIO_RATE  = 48000;   // VAC output rate, always exact
+    static constexpr int FILTER_HZ   = 20000;   // slice filter half-width (MainWindow)
 
     explicit WfmDemodulator(QObject* parent = nullptr);
     ~WfmDemodulator() override;
 
     void start(DaxIqModel* daxIq, const QString& deviceId,
-               const QString& panId = QString(), float freqOffsetHz = 0.0f);
+               const QString& panId = QString());
     void stop();
 
     bool isActive() const { return m_active; }
     void setVolume(int pct) { m_volume = std::clamp(pct / 100.0f, 0.0f, 1.0f); }
 
-    // Real-time Doppler correction: offsetHz = sliceHz − panCenterHz
-    void setFreqOffsetHz(float offsetHz) {
-        if (!m_active) return;
-        const float step = -2.0f * static_cast<float>(M_PI) * offsetHz / m_actualIqRate;
-        m_corrCosStep = std::cos(step);
-        m_corrSinStep = std::sin(step);
-    }
+    // Doppler / offset control. offsetHz = sliceHz − panCentreHz.
+    // Phase-continuous; safe no-op while inactive (applied when DSP exists).
+    void  setFreqOffsetHz(float offsetHz);
+    float maxFreqOffsetHz() const;
 
 signals:
     void commandReady(const QString& cmd);
@@ -90,8 +82,8 @@ private slots:
     void onDaxIqPcm(const QByteArray& pcm);
 
 private:
-    void processIqFloat(const QVector<float>& iqInterleaved);
-    void processIqInt16(const QByteArray& pcm);
+    void ensureDsp(int iqRateHz);
+    void processIqFloat(const float* iq, int frames);
 
     DaxIqModel*         m_daxIq{nullptr};
     WaveOutWriter*      m_waveOut{nullptr};
@@ -99,37 +91,17 @@ private:
     DaxIqCaptureDevice* m_iqDevice{nullptr};
     bool                m_usingDaxCapture{false};
     bool                m_active{false};
+    bool                m_idle{false};   // IQ input gate state (see processIqFloat)
     float               m_volume{1.0f};
 
-    // Doppler correction oscillator
-    float m_corrCos{1.0f};
-    float m_corrSin{0.0f};
-    float m_corrCosStep{1.0f};
-    float m_corrSinStep{0.0f};
-
-    // FM discriminator state
-    float m_prevI{0.0f};
-    float m_prevQ{0.0f};
-
-    // FM noise parabola compensator — two cascaded 1st-order IIR LPF
-    // H(f)² ∝ 1/f² above fc ≈ 1.2 kHz → cancels f² FM noise rise
-    // α = exp(−2π × 1200/48000) ≈ 0.85
-    float m_deemph1{0.0f};
-    float m_deemph2{0.0f};
-
-    // Biquad peaking EQ — compensates external notch at ~12 kHz
-    // Centre 12 kHz, +4 dB, Q = 0.7  (disabled by default; set m_eqEnabled=true to use)
-    float m_eqX1{0.0f}, m_eqX2{0.0f};   // input  delay
-    float m_eqY1{0.0f}, m_eqY2{0.0f};   // output delay
-    bool  m_eqEnabled{true};   // set false to bypass notch compensation
-
-    // FIR delay line (circular buffer)
-    std::array<float, kFirTaps> m_firBuf{};
-    int m_firIdx{0};
+    std::unique_ptr<WfmDsp> m_dsp;
+    std::vector<float>      m_audioBuf;
+    std::vector<float>      m_iqConvBuf;     // Int16/raw → float conversion
+    QAudioFormat            m_captureFormat; // actual DAX capture format
+    float                   m_freqOffsetHz{0.0f};
 
     QString m_panId;
     bool    m_panSent{false};
-    int     m_actualIqRate{IQ_RATE};
 };
 
 } // namespace AetherSDR

@@ -612,11 +612,21 @@ QString RigctlProtocol::cmdSetFreq(const QString& arg)
     if (!ok || hz < 0) return rprt(-1);  // RIG_EINVAL
 
     double mhz = hz / 1e6;
-    QMetaObject::invokeMethod(slice, [slice, mhz]() {
-        // Use tuneAndRecenter so the panadapter follows cross-band
-        // tunes (e.g. WSJT-X band changes). autopan=0 would leave
-        // the pan on the old band. (#536)
-        slice->tuneAndRecenter(mhz);
+    RadioModel* model = m_model;
+    QMetaObject::invokeMethod(slice, [slice, model, mhz]() {
+        // Recenter only when the target falls outside the pan's current
+        // span — the cross-band case (e.g. WSJT-X band changes, #536).
+        // In-span retunes use autopan=0: external Doppler software
+        // (SatPC32) issues set_freq every few seconds, and recentering
+        // each one keeps yanking the pan regardless of the GUI's
+        // Pan-Follows-VFO setting (the recenter happens radio-side).
+        bool inSpan = false;
+        if (auto* pan = model ? model->panadapter(slice->panId()) : nullptr) {
+            const double halfBw = pan->bandwidthMhz() / 2.0;
+            inSpan = halfBw > 0.0 && qAbs(mhz - pan->centerMhz()) <= halfBw;
+        }
+        if (inSpan) slice->setFrequency(mhz);
+        else        slice->tuneAndRecenter(mhz);
     }, Qt::QueuedConnection);
     return rprt(0);
 }

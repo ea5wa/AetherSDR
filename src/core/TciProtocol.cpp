@@ -386,8 +386,19 @@ QString TciProtocol::cmdVfo(const QStringList& args, bool isSet)
     if (!ok || hz < 0) return {};
     double mhz = hz / 1e6;
 
-    QMetaObject::invokeMethod(s, [s, mhz]() {
-        s->tuneAndRecenter(mhz);
+    // Same policy as RigctlProtocol::cmdSetFreq: recenter only for tunes
+    // that leave the pan's current span (band changes); in-span retunes
+    // (Doppler steps from satellite trackers) use autopan=0 so the pan
+    // stays put.
+    RadioModel* model = m_model;
+    QMetaObject::invokeMethod(s, [s, model, mhz]() {
+        bool inSpan = false;
+        if (auto* pan = model ? model->panadapter(s->panId()) : nullptr) {
+            const double halfBw = pan->bandwidthMhz() / 2.0;
+            inSpan = halfBw > 0.0 && qAbs(mhz - pan->centerMhz()) <= halfBw;
+        }
+        if (inSpan) s->setFrequency(mhz);
+        else        s->tuneAndRecenter(mhz);
     }, Qt::QueuedConnection);
 
     m_pendingNotification = QStringLiteral("vfo:%1,0,%2;").arg(trx).arg(hz);

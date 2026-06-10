@@ -147,11 +147,13 @@ void WaveOutWriter::pushData()
     if (free <= 0) return;
 
     QByteArray buf(free, 0);
-    const int n = m_ring.read(buf.data(), free);
-    if (n > 0)
-        m_io->write(buf.constData(), n);
-    // If ring buffer is empty, we write nothing — the sink handles silence
-    // via its own internal buffer until the next tick.
+    m_ring.read(buf.data(), free);
+    // Always push `free` bytes, zero-padded when the ring runs dry — the
+    // same underflow policy as SkyRoof's RingBuffer.ReadBytes. A virtual
+    // audio cable must never starve: HiFi Cable / VB-Cable loop their
+    // internal buffer when the writer stalls mid-stream, which a soundmodem
+    // sees as loud repeating garbage instead of silence.
+    m_io->write(buf.constData(), free);
 }
 
 } // namespace AetherSDR
