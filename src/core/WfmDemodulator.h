@@ -117,6 +117,12 @@ private:
     float m_deemph1{0.0f};
     float m_deemph2{0.0f};
 
+    // Biquad peaking EQ — compensates external notch at ~12 kHz
+    // Centre 12 kHz, +4 dB, Q = 0.7  (disabled by default; set m_eqEnabled=true to use)
+    float m_eqX1{0.0f}, m_eqX2{0.0f};   // input  delay
+    float m_eqY1{0.0f}, m_eqY2{0.0f};   // output delay
+    bool  m_eqEnabled{true};   // set false to bypass notch compensation
+
     // FIR delay line (circular buffer)
     std::array<float, kFirTaps> m_firBuf{};
     int m_firIdx{0};

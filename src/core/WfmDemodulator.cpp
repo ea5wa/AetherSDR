@@ -110,6 +110,8 @@ void WfmDemodulator::start(DaxIqModel* daxIq, const QString& deviceId,
     m_firIdx  = 0;
     m_deemph1 = 0.0f;
     m_deemph2 = 0.0f;
+    m_eqX1 = m_eqX2 = 0.0f;
+    m_eqY1 = m_eqY2 = 0.0f;
 
     qCDebug(lcAudio) << "WfmDemodulator::start device=" << deviceId
                      << "freqOffset=" << freqOffsetHz;
@@ -326,8 +328,33 @@ void WfmDemodulator::processIqFloat(const QVector<float>& iq)
         m_deemph1 = kA * m_deemph1 + kB * lp;
         m_deemph2 = kA * m_deemph2 + kB * m_deemph1;
 
-        // [4] Soft clamp + volume
-        const float s = std::clamp(m_deemph2, -1.0f, 1.0f) * m_volume;
+        // [4] Biquad peaking EQ @ 11.75 kHz  (+9 dB, Q=2.0)  — Direct Form I
+        //   Fills the external notch at 10–13.5 kHz (radio/DAX artefact).
+        //   Narrow peak (BW ≈ fc/Q ≈ 5.9 kHz → covers 8.8–14.7 kHz) so the
+        //   rest of the spectrum is untouched, unlike a broad Q=0.7 bell.
+        //   Audio EQ Cookbook, peaking EQ, fc=11750, fs=48000:
+        //     w0=2π·11750/48000=1.5376  cos=0.03319  sin=0.99945
+        //     A=10^(9/40)=1.6788  α=sin/(2Q)=0.24986
+        //   Coefficients normalised by a0 (b1=a1, symmetric peaking):
+        //     b0=1.23561  b1=−0.05778  b2=0.50529
+        //     a1=−0.05778 a2=0.74092
+        //   DC gain = 1.0 ✓  Nyquist gain = 1.0 ✓  peak @11.75 kHz = +9 dB ✓
+        float comp = m_deemph2;
+        if (m_eqEnabled) {
+            static constexpr float b0 =  1.23561f;
+            static constexpr float b1 = -0.05778f;
+            static constexpr float b2 =  0.50529f;
+            static constexpr float a1 = -0.05778f;
+            static constexpr float a2 =  0.74092f;
+            const float y = b0 * comp + b1 * m_eqX1 + b2 * m_eqX2
+                                      - a1 * m_eqY1 - a2 * m_eqY2;
+            m_eqX2 = m_eqX1;  m_eqX1 = comp;
+            m_eqY2 = m_eqY1;  m_eqY1 = y;
+            comp = y;
+        }
+
+        // [5] Soft clamp + volume
+        const float s = std::clamp(comp, -1.0f, 1.0f) * m_volume;
 
         // [4] Stereo Float32 → ring buffer → QIODevice → QAudioSink
         out[2*i]   = s;
