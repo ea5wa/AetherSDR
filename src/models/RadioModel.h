@@ -387,6 +387,12 @@ signals:
     // Emitted when the radio reports the panadapter's dBm display range.
     void panadapterLevelChanged(float minDbm, float maxDbm);
     void panadapterAdded(PanadapterModel* pan);
+    // Emitted when a previous-session pan model is reclaimed on reconnect
+    // instead of created fresh. The applet/widget wiring from the original
+    // panadapterAdded survives (model and widget both outlive the disconnect),
+    // but connections MainWindow tears down at disconnect (per-pan FPS and
+    // waterfall line-duration reconcilers) must be re-established from this.
+    void panadapterReclaimed(PanadapterModel* pan);
     void panadapterRemoved(const QString& panId);
     // Emitted when createPanadapter() is blocked because the radio's pan limit is reached.
     void panadapterLimitReached(int limit, const QString& model);
@@ -523,8 +529,8 @@ private:
     void scheduleRxAudioStreamEnsure(const QString& reason);
     void logRemoteAudioRxSummary(const QString& reason) const;
 
-    void configurePan();
-    void configureWaterfall();
+    void configurePan(const QString& panId);
+    void configureWaterfall(const QString& waterfallId);
     void registerAsGuiClient(const QString& clientId);
     void disconnectPendingClientsThen(std::function<void()> continuation);
     // LAN-only: subscribe to radio+client topics early, wait 400 ms for
@@ -574,6 +580,8 @@ private:
     // fall back to createDefaultSlice() (which issues "display panafall create")
     // when no owned pan exists yet.
     void ensureDefaultSlicePreferringRestoredPan();
+    void stageSessionModelsForReconnect();
+    void pruneStaleSessionModels(quint64 generation);
 
     RadioConnection*  m_connection{nullptr};
     QThread*          m_connThread{nullptr};
@@ -679,6 +687,7 @@ private:
     mutable QMap<QString, QString> m_antennaAliases;
 
     QMap<QString, PanadapterModel*> m_panadapters;  // panId → model
+    QMap<QString, PanadapterModel*> m_stalePanadapters;  // previous session, kept alive for UI reuse
     QString m_activePanId;       // currently active panadapter
     // Deferred "display pan" status pending ownership confirmation. Paired
     // with QDateTime::currentSecsSinceEpoch() at insert so a sweep on insert
@@ -781,6 +790,12 @@ private:
 
 private:
     QList<SliceModel*> m_slices;
+    QMap<int, SliceModel*> m_staleSlices;  // previous session, kept alive for UI reuse
+    quint64 m_sessionModelGeneration{0};
+    // chassis_serial of the radio the staged session models came from.
+    // Reclaim-by-ID is only valid against the same radio — slice indexes and
+    // stream IDs collide near-certainly across different radios.
+    QString m_staleSessionSerial;
     QMap<int, MemoryEntry> m_memories;
     QStringList m_globalProfiles;
     QString     m_activeGlobalProfile;

@@ -83,6 +83,9 @@
 #include "MemoryDialog.h"
 #include "SwrSweepLicenseDialog.h"
 #include "DxClusterDialog.h"
+#ifdef HAVE_WEBSOCKETS
+#include "FreeDvReporterDialog.h"
+#endif
 #include "Ax25HfPacketDecodeDialog.h"
 #include "FlexControlDialog.h"
 #include "CwxPanel.h"
@@ -185,6 +188,8 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include "core/VersionNumber.h"
+#include "core/UpdateChecker.h"
+#include <QDesktopServices>
 #include <QPointer>
 #include <QTextEdit>
 #include <QPlainTextEdit>
@@ -1656,6 +1661,36 @@ MainWindow::MainWindow(QWidget* parent)
     m_bandPlanMgr = new BandPlanManager(this);
     m_bandPlanMgr->loadPlans();
 
+    // UpdateChecker — must be created before buildMenuBar() which references it
+    m_updateChecker = new UpdateChecker(this);
+    connect(m_updateChecker, &UpdateChecker::updateAvailable, this, [this](const QString& ver) {
+        const QString current = QCoreApplication::applicationVersion();
+        QMessageBox box(this);
+        box.setWindowTitle("AetherSDR Update Available");
+        box.setIcon(QMessageBox::Information);
+        box.setText(QString("AetherSDR v%1 is available.").arg(ver));
+        box.setInformativeText(QString("You are running v%1.").arg(current));
+        QPushButton* viewBtn = box.addButton("View Latest Release", QMessageBox::ActionRole);
+        viewBtn->setAutoDefault(false);
+        QPushButton* closeBtn = box.addButton(QMessageBox::Close);
+        closeBtn->setAutoDefault(false);
+        // Force minimum width via layout spacer — setMinimumWidth() is ignored by QMessageBox
+        if (auto* grid = qobject_cast<QGridLayout*>(box.layout()))
+            grid->addItem(new QSpacerItem(480, 0, QSizePolicy::Minimum, QSizePolicy::Fixed),
+                          grid->rowCount(), 0, 1, grid->columnCount());
+        box.exec();
+        if (box.clickedButton() == viewBtn)
+            QDesktopServices::openUrl(QUrl(UpdateChecker::kReleasesPageUrl));
+    });
+    connect(m_updateChecker, &UpdateChecker::upToDate, this, [this](const QString& ver) {
+        QMessageBox::information(this, "Check for Updates",
+            QString("AetherSDR is up to date (v%1).").arg(ver));
+    });
+    connect(m_updateChecker, &UpdateChecker::checkFailed, this, [this]() {
+        QMessageBox::warning(this, "Check for Updates",
+            "Could not reach GitHub. Check your connection and try again.");
+    });
+
     buildMenuBar();
     buildUI();
 #ifdef Q_OS_WIN
@@ -2006,6 +2041,80 @@ MainWindow::MainWindow(QWidget* parent)
             [this](const QString& t, float cost) { publishCwDecodeMqtt(t, cost, true);  });
     connect(&m_cwDecoderTx, &CwDecoder::textDecoded, this,
             [this](const QString& t, float cost) { publishCwDecodeMqtt(t, cost, false); });
+
+    // aethersdr/radio/state — publish on PTT transitions.
+    // Slice freq/mode changes are wired per-slice in setActiveSliceInternal().
+    m_radioStateCoalesceTimer.setSingleShot(true);
+    m_radioStateCoalesceTimer.setInterval(150);
+    connect(&m_radioStateCoalesceTimer, &QTimer::timeout,
+            this, &MainWindow::publishRadioStateMqtt);
+    connect(&m_radioModel, &RadioModel::radioTransmittingChanged,
+            this, [this](bool) { publishRadioStateMqtt(); });
+    // Debounce timer for end-of-CWX detection (queueEmpty unreliable with sync_cwx=0).
+    // Fires 1 s after the last tx:false with no intervening tx:true = transmission done.
+    m_cwxTxEndTimer.setSingleShot(true);
+    connect(&m_cwxTxEndTimer, &QTimer::timeout, this, [this]() {
+        if (m_cwxSavedWpm > 0 && m_radioModel.cwxModel().speed() == m_cwxSentWpm)
+            m_radioModel.cwxModel().setSpeed(m_cwxSavedWpm);
+        if (m_cwxSavedHz  > 0 && m_radioModel.transmitModel().cwPitch() == m_cwxSentHz)
+            m_radioModel.transmitModel().setCwPitch(m_cwxSavedHz);
+        m_cwxSavedWpm = 0;
+        m_cwxSavedHz  = 0;
+        m_cwxSentWpm  = 0;
+        m_cwxSentHz   = 0;
+        m_cwxTransmitting = false;
+        m_cwxPublishedTxTrue = false;
+        publishRadioStateMqtt();
+    });
+
+    // aethersdr/cw/transmit → CWX keyer.
+    // Payload: {"text":"de k5ptb","speed_wpm":28,"pitch_hz":600}
+    // speed_wpm and pitch_hz are optional; absent = use current radio settings.
+    connect(m_mqttClient, &MqttClient::messageReceived,
+            this, [this](const QString& topic, const QByteArray& payload) {
+        if (topic != QString::fromLatin1(kCwTransmitTopic)) return;
+        if (!isMqttTopicEnabled(QString::fromLatin1(kCwTransmitTopic))) return;
+        const QJsonObject obj =
+            QJsonDocument::fromJson(payload).object();
+        const QString text = obj.value(QStringLiteral("text")).toString().trimmed();
+        if (text.isEmpty()) return;
+        auto& tx = m_radioModel.transmitModel();
+        const int wpm = obj.value(QStringLiteral("speed_wpm")).toInt(0);
+        const int hz  = obj.value(QStringLiteral("pitch_hz")).toInt(0);
+        const bool changeWpm = (wpm >= 5 && wpm <= 100);
+        const bool changeHz  = (hz >= 100 && hz <= 6000);
+        if (!m_cwxTransmitting) {
+            m_cwxSavedWpm = changeWpm ? m_radioModel.cwxModel().speed() : 0;
+            m_cwxSavedHz  = changeHz  ? tx.cwPitch() : 0;
+        }
+        if (changeWpm) { m_radioModel.cwxModel().setSpeed(wpm); m_cwxSentWpm = wpm; }
+        if (changeHz)  { tx.setCwPitch(hz);                   m_cwxSentHz  = hz;  }
+        m_cwxTxEndTimer.stop();
+        m_cwxPublishedTxTrue = false;
+        m_cwxTransmitting = true;
+        m_radioModel.cwxModel().send(text);
+        disconnect(m_cwxSpeedRestoreConn);
+        m_cwxSpeedRestoreConn = connect(
+            &m_radioModel.cwxModel(), &CwxModel::queueEmpty,
+            this, [this]() {
+                // Fast path if queueEmpty fires (sync_cwx=1 or firmware sends queue=0).
+                // Identical work to m_cwxTxEndTimer.timeout — whichever fires first wins.
+                if (m_cwxSavedWpm > 0 && m_radioModel.cwxModel().speed() == m_cwxSentWpm)
+                    m_radioModel.cwxModel().setSpeed(m_cwxSavedWpm);
+                if (m_cwxSavedHz  > 0 && m_radioModel.transmitModel().cwPitch() == m_cwxSentHz)
+                    m_radioModel.transmitModel().setCwPitch(m_cwxSavedHz);
+                m_cwxSavedWpm = 0;
+                m_cwxSavedHz  = 0;
+                m_cwxSentWpm  = 0;
+                m_cwxSentHz   = 0;
+                m_cwxTxEndTimer.stop();
+                m_cwxTransmitting = false;
+                m_cwxPublishedTxTrue = false;
+                if (!m_radioModel.isRadioTransmitting())
+                    publishRadioStateMqtt();
+                disconnect(m_cwxSpeedRestoreConn);
+            });
+    });
 
     // MQTT → panadapter overlay display
     connect(m_appletPanel->mqttApplet(), &MqttApplet::displayValueChanged,
@@ -3152,6 +3261,22 @@ MainWindow::MainWindow(QWidget* parent)
             m_layoutRestoreTimer->start();
         }
     });
+    // A reclaimed (previous-session) pan keeps its applet and all the
+    // model→widget wiring from its original panadapterAdded, so the full add
+    // path must not run again (it would duplicate connections). But the
+    // disconnect path tears down the per-pan FPS / waterfall-line-duration
+    // reconcilers, so those need re-wiring here.
+    connect(&m_radioModel, &RadioModel::panadapterReclaimed,
+            this, [this](PanadapterModel* pan) {
+        if (m_shuttingDown || !m_panStack || !pan) {
+            return;
+        }
+        auto* applet = m_panStack->panadapter(pan->panId());
+        if (!applet) {
+            return;
+        }
+        wirePanReconcilers(applet, pan);
+    });
     // Re-push xpixels/ypixels when the radio requests it (profile change, reconnect, etc.)
     connect(&m_radioModel, &RadioModel::panDimensionsNeeded,
             this, [this](const QString& panId) {
@@ -3471,6 +3596,11 @@ MainWindow::MainWindow(QWidget* parent)
     // Overlay-menu antenna wiring is now per-pan in wirePanadapter() (#1260).
     // Antenna list and S-meter are now wired per-widget in onSliceAdded.
 
+    // ── Title bar: Pan Follow ────────────────────────────────────────────────
+    connect(m_titleBar, &TitleBar::panFollowToggled,
+            this, &MainWindow::setPanFollow);
+    if (m_titleBar->isPanFollowChecked()) setPanFollow(true);
+
     // ── Title bar: PC Audio, master volume, headphone volume ────────────────
     // The remote_audio_rx stream controls the radio's audio routing:
     // stream exists → audio to PC; stream removed → audio to radio speakers.
@@ -3674,7 +3804,7 @@ MainWindow::MainWindow(QWidget* parent)
             m_appletPanel, &AppletPanel::setTunerVisible);
     connect(&m_radioModel.tunerModel(), &TunerModel::presenceChanged,
             this, [this](bool present) {
-        m_tgxlIndicator->setVisible(present);
+        m_tgxlContainer->setVisible(present);
         m_tgxlSeparator->setVisible(present);
         // Auto-connect/disconnect direct TGXL connection for manual relay control (#469)
         if (present) {
@@ -3739,6 +3869,8 @@ MainWindow::MainWindow(QWidget* parent)
             amp->setMainsVoltage(kvs["vac"].toInt());
         if (kvs.contains("state"))
             amp->setState(kvs["state"]);
+        if (kvs.contains("fanmode"))
+            amp->setFanMode(kvs["fanmode"]);
         if (kvs.contains("meffa"))
             amp->setMeff(kvs["meffa"]);
         // Convert PGXL dBm to watts and feed S-Meter alongside radio meters.
@@ -3805,6 +3937,10 @@ MainWindow::MainWindow(QWidget* parent)
         if (kvs.contains("meffa"))
             amp->setMeff(kvs["meffa"]);
     });
+    // Fan mode cycle button → direct PGXL command (fan control is not in the radio API)
+    connect(m_appletPanel->ampApplet(), &AmpApplet::fanModeChanged, this, [this](const QString& mode) {
+        m_pgxlConn.sendCommand(QString("setup fanmode=%1").arg(mode));
+    });
     // OPERATE button → PGXL standby/operate command via radio amplifier API
     connect(m_appletPanel->ampApplet(), &AmpApplet::operateToggled, this, [this](bool on) {
         if (!m_radioModel.ampHandle().isEmpty())
@@ -3838,30 +3974,32 @@ MainWindow::MainWindow(QWidget* parent)
 
     // TGXL indicator: two-line rich text — label on top, state smaller below.
     // Green = OPERATE, amber = BYPASS, grey = STANDBY (matches SmartSDR)
-    auto setIndicatorHtml = [](QLabel* lbl, const QString& name,
+    auto setIndicatorHtml = [](QLabel* nameLbl, QLabel* stateLbl,
                                const QString& state, const QString& color) {
-        lbl->setText(QString("<span style='color:%1; font-size:18px; font-weight:bold;'>%2</span><br>"
-                             "<span style='color:%1; font-size:11px;'>%3</span>")
-                     .arg(color, name, state));
+        nameLbl->setStyleSheet(
+            QString("QLabel { color: %1; font-size:18px; font-weight:bold; }").arg(color));
+        stateLbl->setStyleSheet(
+            QString("QLabel { color: %1; font-size:11px; }").arg(color));
+        stateLbl->setText(state);
     };
 
     auto updateTgxlStyle = [this, setIndicatorHtml]() {
         auto& t = m_radioModel.tunerModel();
         if (t.isOperate() && !t.isBypass())
-            setIndicatorHtml(m_tgxlIndicator, "TUN", "OPERATE", "#00e060");
+            setIndicatorHtml(m_tgxlIndicator, m_tgxlStateLabel, "OPERATE", "#00e060");
         else if (t.isOperate() && t.isBypass())
-            setIndicatorHtml(m_tgxlIndicator, "TUN", "BYPASS", "#e0a000");
+            setIndicatorHtml(m_tgxlIndicator, m_tgxlStateLabel, "BYPASS", "#e0a000");
         else
-            setIndicatorHtml(m_tgxlIndicator, "TUN", "STANDBY", "#404858");
+            setIndicatorHtml(m_tgxlIndicator, m_tgxlStateLabel, "STANDBY", "#404858");
     };
     connect(&m_radioModel.tunerModel(), &TunerModel::stateChanged, this, updateTgxlStyle);
 
     // PGXL indicator: OPERATE (green) or STANDBY (grey) — no bypass for PGXL
     auto updatePgxlStyle = [this, setIndicatorHtml]() {
         if (m_radioModel.ampOperate())
-            setIndicatorHtml(m_pgxlIndicator, "AMP", "OPERATE", "#00e060");
+            setIndicatorHtml(m_pgxlIndicator, m_pgxlStateLabel, "OPERATE", "#00e060");
         else
-            setIndicatorHtml(m_pgxlIndicator, "AMP", "STANDBY", "#404858");
+            setIndicatorHtml(m_pgxlIndicator, m_pgxlStateLabel, "STANDBY", "#404858");
     };
     connect(&m_radioModel, &RadioModel::ampStateChanged, this, [this, updatePgxlStyle]() {
         updatePgxlStyle();
@@ -3873,7 +4011,7 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     connect(&m_radioModel, &RadioModel::amplifierChanged, this, [this, updatePgxlStyle](bool present) {
-        m_pgxlIndicator->setVisible(present);
+        m_pgxlContainer->setVisible(present);
         m_pgxlSeparator->setVisible(present);
         m_appletPanel->setAmpVisible(present);
         if (present) {
@@ -4347,6 +4485,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_dialBackend->moveToThread(m_extCtrlThread);
 #endif
 
+
     m_dialCoalesceTimer.setSingleShot(true);
     m_dialCoalesceTimer.setInterval(20);
     connect(&m_dialCoalesceTimer, &QTimer::timeout, this, [this]() {
@@ -4477,9 +4616,20 @@ MainWindow::MainWindow(QWidget* parent)
     {
         auto& s = AppSettings::instance();
         if (!s.contains("HidEncoderEnabled")) {
+            // Old code treated absence of HidEncoderAutoDetect as True (implicit default).
+            // Match that: if the key was never written, the user had HID on.
             const bool hadAutodetect =
-                s.value("HidEncoderAutoDetect", "False").toString() == "True";
+                s.value("HidEncoderAutoDetect", "True").toString() == "True";
             s.setValue("HidEncoderEnabled", hadAutodetect ? "True" : "False");
+        } else if (!s.contains("HidEncoderEnabledMigrationV2")) {
+            // V2 fix: the first migration wrote "False" for users who never set
+            // HidEncoderAutoDetect (old implicit default was True, not False).
+            // Correct those installs: if AutoDetect is absent they had it on.
+            if (s.value("HidEncoderEnabled") == "False" &&
+                    !s.contains("HidEncoderAutoDetect")) {
+                s.setValue("HidEncoderEnabled", "True");
+            }
+            s.setValue("HidEncoderEnabledMigrationV2", "True");
         }
     }
     // Same TCC concern as the Ulanzi gate above (#3257). HidEncoderManager::
@@ -5507,6 +5657,16 @@ MainWindow::~MainWindow()
     delete m_networkDiagnosticsHistory;
     m_networkDiagnosticsHistory = nullptr;
 
+    // Ax25HfPacketDecodeDialog::~Ax25HfPacketDecodeDialog calls
+    // m_audio->setTncRxTapEnabled(false) via a raw AudioEngine pointer.
+    // AudioEngine is freed below before Qt's deleteChildren() runs — same
+    // UAF pattern as m_networkDiagnosticsDialog above. Tear it down now
+    // while AudioEngine is still alive.
+    if (m_ax25HfPacketDecodeDialog) {
+        delete m_ax25HfPacketDecodeDialog.data();
+        m_ax25HfPacketDecodeDialog = nullptr;
+    }
+
     // Stop audio processing on the worker thread before destruction (#502).
     // Use BlockingQueuedConnection to ensure completion before we proceed.
     if (m_audio && m_audioThread && m_audioThread->isRunning()) {
@@ -5975,8 +6135,10 @@ void MainWindow::showMqttSettingsDialog()
 void MainWindow::publishCwDecodeMqtt(const QString& text, float cost, bool rx)
 {
     if (!m_mqttClient) return;
+    if (!isMqttTopicEnabled(QString::fromLatin1(kCwDecodeTopic))) return;
     // No CW panel active → nothing is displayed → don't publish.
-    if (!m_cwDecoderApplet || cost >= m_cwDecoderApplet->cwCostThreshold()) return;
+    if (!m_cwDecoderApplet || cost >= m_cwDecoderApplet->cwCostThreshold())
+        return;
     // Mirror panel normalization: \n → space; drop whitespace-only TX chunks.
     QString clean = text;
     clean.replace(QLatin1Char('\n'), QLatin1Char(' '));
@@ -5986,7 +6148,39 @@ void MainWindow::publishCwDecodeMqtt(const QString& text, float cost, bool rx)
     obj[QStringLiteral("rx")]   = rx;
     if (auto* s = activeSlice(); s && s->frequency() > 0.0)
         obj[QStringLiteral("freq")] = s->frequency();
+    if (rx) {
+        if (m_cwLastPitchHz  > 0.0f) obj[QStringLiteral("pitch_hz")]  = m_cwLastPitchHz;
+        if (m_cwLastSpeedWpm > 0.0f) obj[QStringLiteral("speed_wpm")] = m_cwLastSpeedWpm;
+    } else {
+        const auto& tm = m_radioModel.transmitModel();
+        if (tm.cwPitch() > 0) obj[QStringLiteral("pitch_hz")]  = tm.cwPitch();
+        if (tm.cwSpeed() > 0) obj[QStringLiteral("speed_wpm")] = tm.cwSpeed();
+    }
     m_mqttClient->publish(QString::fromLatin1(kCwDecodeTopic),
+                          QJsonDocument(obj).toJson(QJsonDocument::Compact));
+}
+
+void MainWindow::publishRadioStateMqtt()
+{
+    if (!m_mqttClient) return;
+    if (!isMqttTopicEnabled(QString::fromLatin1(kRadioStateTopic))) return;
+    if (m_cwxTransmitting) {
+        if (!m_radioModel.isRadioTransmitting()) {
+            m_cwxTxEndTimer.start(1000);  // might be done; confirm after 1 s silence
+            return;
+        }
+        m_cwxTxEndTimer.stop();           // element started — not done yet
+        if (m_cwxPublishedTxTrue) return;
+        m_cwxPublishedTxTrue = true;
+    }
+    auto* s = activeSlice();
+    if (!s) return;
+    QJsonObject obj;
+    obj[QStringLiteral("slice")] = s->letter();
+    obj[QStringLiteral("freq")]  = s->frequency();
+    obj[QStringLiteral("mode")]  = s->mode();
+    obj[QStringLiteral("tx")]    = m_radioModel.isRadioTransmitting();
+    m_mqttClient->publish(QString::fromLatin1(kRadioStateTopic),
                           QJsonDocument(obj).toJson(QJsonDocument::Compact));
 }
 #endif
@@ -6801,6 +6995,9 @@ void MainWindow::showAx25HfPacketDecodeDialog()
         m_persistentDialogs.append(QPointer<PersistentDialog>(dlg));
     }
     m_ax25HfPacketDecodeDialog->setAttachedSlice(slice);
+#ifdef HAVE_MQTT
+    m_ax25HfPacketDecodeDialog->setMqttClient(m_mqttClient);
+#endif
     m_ax25HfPacketDecodeDialog->show();
     m_ax25HfPacketDecodeDialog->raise();
     m_ax25HfPacketDecodeDialog->activateWindow();
@@ -6825,6 +7022,9 @@ void MainWindow::startKissTncOnStartupIfConfigured()
         AppSettings::instance().value("FramelessWindow", "True").toString() == "True");
     m_ax25HfPacketDecodeDialog = dlg;
     m_persistentDialogs.append(QPointer<PersistentDialog>(dlg));
+#ifdef HAVE_MQTT
+    m_ax25HfPacketDecodeDialog->setMqttClient(m_mqttClient);
+#endif
 }
 
 void MainWindow::showFlexControlDialog()
@@ -8446,7 +8646,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         updateBandStackIndicator();
         return true;
     }
-    if (obj == m_tgxlIndicator && event->type() == QEvent::MouseButtonPress) {
+    if (obj == m_tgxlContainer && event->type() == QEvent::MouseButtonPress) {
         auto& t = m_radioModel.tunerModel();
         // Cycle: OPERATE → BYPASS → STANDBY → OPERATE
         if (t.isOperate() && !t.isBypass())
@@ -8459,7 +8659,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         }
         return true;
     }
-    if (obj == m_pgxlIndicator && event->type() == QEvent::MouseButtonPress) {
+    if (obj == m_pgxlContainer && event->type() == QEvent::MouseButtonPress) {
         // Simple toggle: OPERATE ↔ STANDBY (PGXL has no BYPASS)
         m_radioModel.setAmpOperate(!m_radioModel.ampOperate());
         return true;
@@ -9632,6 +9832,13 @@ void MainWindow::buildMenuBar()
         m_appletPanel->resetOrder();
     });
 
+#ifdef HAVE_WEBSOCKETS
+    {
+        auto* fdvReporterAct = viewMenu->addAction(tr("FreeDV Reporter..."));
+        connect(fdvReporterAct, &QAction::triggered, this, &MainWindow::showFreeDvReporter);
+    }
+#endif
+
     viewMenu->addSeparator();
     m_minimalModeAction = viewMenu->addAction("Minimal Mode\tCtrl+M");
     m_minimalModeAction->setCheckable(true);
@@ -9838,6 +10045,9 @@ void MainWindow::buildMenuBar()
                                            return renderer;
                                        });
         dlg.exec();
+    });
+    helpMenu->addAction("Check for Updates...", this, [this]() {
+        m_updateChecker->checkNow();
     });
     helpMenu->addSeparator();
     helpMenu->addAction("About AetherSDR", this, [this]{
@@ -10547,6 +10757,7 @@ void MainWindow::buildUI()
     auto* radioVbox = new QVBoxLayout(radioStack);
     radioVbox->setContentsMargins(0, 0, 0, 0);
     radioVbox->setSpacing(0);
+    radioVbox->setAlignment(Qt::AlignVCenter);
     m_radioInfoLabel = new QLabel("");
     AetherSDR::ThemeManager::instance().applyStyleSheet(m_radioInfoLabel, "QLabel { color: {{color.text.secondary}}; font-size: 12px; }");
     m_radioInfoLabel->setAlignment(Qt::AlignCenter);
@@ -10583,6 +10794,7 @@ void MainWindow::buildUI()
     auto* gpsVbox = new QVBoxLayout(gpsStack);
     gpsVbox->setContentsMargins(0, 0, 0, 0);
     gpsVbox->setSpacing(0);
+    gpsVbox->setAlignment(Qt::AlignVCenter);
     m_gpsLabel = new QLabel("");
     AetherSDR::ThemeManager::instance().applyStyleSheet(m_gpsLabel, "QLabel { color: {{color.text.secondary}}; font-size: 12px; }");
     m_gpsLabel->setAlignment(Qt::AlignCenter);
@@ -10602,6 +10814,7 @@ void MainWindow::buildUI()
         auto* cpuVbox = new QVBoxLayout(cpuStack);
         cpuVbox->setContentsMargins(0, 0, 0, 0);
         cpuVbox->setSpacing(0);
+        cpuVbox->setAlignment(Qt::AlignVCenter);
         m_cpuLabel = new QLabel("CPU: \u2014");
         AetherSDR::ThemeManager::instance().applyStyleSheet(m_cpuLabel, "QLabel { color: {{color.text.secondary}}; font-size: 12px; }");
         m_cpuLabel->setAlignment(Qt::AlignCenter);
@@ -10690,10 +10903,13 @@ void MainWindow::buildUI()
                 memBytes = info.phys_footprint;
             }
 #else
+            // /proc files report size 0 via stat(), so QFile::atEnd() returns true
+            // immediately (pos >= size → 0 >= 0). Drive the loop off readLine()
+            // returning empty instead.
             QFile statusFile("/proc/self/status");
             if (statusFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                while (!statusFile.atEnd()) {
-                    const QByteArray line = statusFile.readLine();
+                QByteArray line;
+                while (!(line = statusFile.readLine()).isEmpty()) {
                     if (line.startsWith("VmRSS:")) {
                         memBytes = line.mid(6).trimmed().split(' ').first().toULongLong() * 1024ULL;
                         break;
@@ -10717,6 +10933,7 @@ void MainWindow::buildUI()
     auto* paVbox = new QVBoxLayout(paStack);
     paVbox->setContentsMargins(0, 0, 0, 0);
     paVbox->setSpacing(0);
+    paVbox->setAlignment(Qt::AlignVCenter);
     m_paTempLabel = new QLabel("");
     AetherSDR::ThemeManager::instance().applyStyleSheet(m_paTempLabel, "QLabel { color: {{color.text.secondary}}; font-size: 12px; }");
     m_paTempLabel->setAlignment(Qt::AlignCenter);
@@ -10739,6 +10956,7 @@ void MainWindow::buildUI()
     auto* netVbox = new QVBoxLayout(netStack);
     netVbox->setContentsMargins(0, 0, 0, 0);
     netVbox->setSpacing(0);
+    netVbox->setAlignment(Qt::AlignVCenter);
     auto* netTitle = new QLabel("Network:");
     AetherSDR::ThemeManager::instance().applyStyleSheet(netTitle, "QLabel { color: {{color.text.secondary}}; font-size: 12px; }");
     netTitle->setAlignment(Qt::AlignCenter);
@@ -10766,26 +10984,75 @@ void MainWindow::buildUI()
     m_tgxlSeparator = addSep();
     m_tgxlSeparator->setVisible(false);
 
-    m_tgxlIndicator = new QLabel;
-    m_tgxlIndicator->setTextFormat(Qt::RichText);
-    m_tgxlIndicator->setAlignment(Qt::AlignCenter);
-    m_tgxlIndicator->setCursor(Qt::PointingHandCursor);
-    m_tgxlIndicator->setToolTip("Tuner Genius XL — click to cycle OPERATE/BYPASS/STANDBY");
-    m_tgxlIndicator->installEventFilter(this);
-    m_tgxlIndicator->setVisible(false);
-    hbox->addWidget(m_tgxlIndicator);
+    // TUN container — two-label stack matching the CPU/PA/Network pattern.
+    // Minimum width is sized to the longest possible state string ("STANDBY")
+    // so the top label never shifts when the bottom label cycles through states.
+    m_tgxlContainer = new QWidget;
+    m_tgxlContainer->setCursor(Qt::PointingHandCursor);
+    m_tgxlContainer->setToolTip("Tuner Genius XL\nClick to cycle OPERATE / BYPASS / STANDBY");
+    m_tgxlContainer->setAccessibleName("Tuner Genius XL status");
+    m_tgxlContainer->setAccessibleDescription("Click to cycle between OPERATE, BYPASS, and STANDBY");
+    m_tgxlContainer->installEventFilter(this);
+    m_tgxlContainer->setVisible(false);
+    {
+        auto* vbox = new QVBoxLayout(m_tgxlContainer);
+        vbox->setContentsMargins(0, 0, 0, 4);
+        vbox->setSpacing(0);
+        vbox->setAlignment(Qt::AlignVCenter);
+        m_tgxlIndicator = new QLabel("TUN");
+        m_tgxlIndicator->setStyleSheet("QLabel { font-size:18px; font-weight:bold; }");
+        m_tgxlIndicator->setAlignment(Qt::AlignCenter);
+        m_tgxlStateLabel = new QLabel("STANDBY");
+        m_tgxlStateLabel->setStyleSheet("QLabel { font-size:11px; }");
+        m_tgxlStateLabel->setAlignment(Qt::AlignCenter);
+        // Fix minimum width to the widest state so "TUN" never shifts.
+        // Use an explicit QFont at the correct pixel size — the stylesheet hasn't
+        // been processed yet so label->font() would return the wrong metrics.
+        {
+            QFont f = m_tgxlStateLabel->font();
+            f.setPixelSize(11);
+            const int minW = QFontMetrics(f).horizontalAdvance("STANDBY") + 16;
+            m_tgxlStateLabel->setMinimumWidth(minW);
+            m_tgxlContainer->setMinimumWidth(minW);
+        }
+        vbox->addWidget(m_tgxlIndicator);
+        vbox->addWidget(m_tgxlStateLabel);
+    }
+    hbox->addWidget(m_tgxlContainer);
 
     m_pgxlSeparator = addSep();
     m_pgxlSeparator->setVisible(false);
 
-    m_pgxlIndicator = new QLabel;
-    m_pgxlIndicator->setTextFormat(Qt::RichText);
-    m_pgxlIndicator->setAlignment(Qt::AlignCenter);
-    m_pgxlIndicator->setCursor(Qt::PointingHandCursor);
-    m_pgxlIndicator->setToolTip("Power Genius XL — click to toggle OPERATE/STANDBY");
-    m_pgxlIndicator->installEventFilter(this);
-    m_pgxlIndicator->setVisible(false);
-    hbox->addWidget(m_pgxlIndicator);
+    // AMP container — same pattern; PGXL has no BYPASS so widest state is "STANDBY".
+    m_pgxlContainer = new QWidget;
+    m_pgxlContainer->setCursor(Qt::PointingHandCursor);
+    m_pgxlContainer->setToolTip("Power Genius XL\nClick to cycle OPERATE / STANDBY");
+    m_pgxlContainer->setAccessibleName("Power Genius XL status");
+    m_pgxlContainer->setAccessibleDescription("Click to cycle between OPERATE and STANDBY");
+    m_pgxlContainer->installEventFilter(this);
+    m_pgxlContainer->setVisible(false);
+    {
+        auto* vbox = new QVBoxLayout(m_pgxlContainer);
+        vbox->setContentsMargins(0, 0, 0, 4);
+        vbox->setSpacing(0);
+        vbox->setAlignment(Qt::AlignVCenter);
+        m_pgxlIndicator = new QLabel("AMP");
+        m_pgxlIndicator->setStyleSheet("QLabel { font-size:18px; font-weight:bold; }");
+        m_pgxlIndicator->setAlignment(Qt::AlignCenter);
+        m_pgxlStateLabel = new QLabel("STANDBY");
+        m_pgxlStateLabel->setStyleSheet("QLabel { font-size:11px; }");
+        m_pgxlStateLabel->setAlignment(Qt::AlignCenter);
+        {
+            QFont f = m_pgxlStateLabel->font();
+            f.setPixelSize(11);
+            const int minW = QFontMetrics(f).horizontalAdvance("STANDBY") + 16;
+            m_pgxlStateLabel->setMinimumWidth(minW);
+            m_pgxlContainer->setMinimumWidth(minW);
+        }
+        vbox->addWidget(m_pgxlIndicator);
+        vbox->addWidget(m_pgxlStateLabel);
+    }
+    hbox->addWidget(m_pgxlContainer);
 
     addSep();
 
@@ -10809,6 +11076,7 @@ void MainWindow::buildUI()
     auto* timeVbox = new QVBoxLayout(timeStack);
     timeVbox->setContentsMargins(0, 0, 0, 0);
     timeVbox->setSpacing(0);
+    timeVbox->setAlignment(Qt::AlignVCenter);
     m_gpsDateLabel = new QLabel("");
     AetherSDR::ThemeManager::instance().applyStyleSheet(m_gpsDateLabel, "QLabel { color: {{color.text.secondary}}; font-size: 12px; }");
     m_gpsDateLabel->setAlignment(Qt::AlignCenter);
@@ -11319,11 +11587,11 @@ void MainWindow::onConnectionStateChanged(bool connected)
         }
         refreshMemoryBrowsePanel();
         updateBandStackIndicator();
-        m_tgxlIndicator->setVisible(false);
+        m_tgxlContainer->setVisible(false);
         m_tgxlSeparator->setVisible(false);
         m_tgxlConn.disconnect();
         m_pgxlConn.disconnect();
-        m_pgxlIndicator->setVisible(false);
+        m_pgxlContainer->setVisible(false);
         m_pgxlSeparator->setVisible(false);
         m_txIndicator->setStyleSheet("QLabel { color: rgba(255,255,255,128); font-weight: bold; font-size: 21px; }");
         m_txIndicator->setText("TX");
@@ -11591,6 +11859,10 @@ void MainWindow::finishPanadapterConnectionAnimation()
 {
     if (!m_waitingForFirstPanadapterFrame || !m_panadapterConnectionAnimationVisible)
         return;
+
+    if (!m_radioModel.isConnected()) {
+        return;
+    }
 
     setPanadapterConnectionAnimation(false);
 }
@@ -12702,6 +12974,10 @@ void MainWindow::setActiveSliceInternal(int sliceId, bool revealOffscreen)
 #endif
     if (sliceId != prevId && m_ax25HfPacketDecodeDialog)
         m_ax25HfPacketDecodeDialog->setAttachedSlice(s);
+#ifdef HAVE_WEBSOCKETS
+    if (sliceId != prevId && m_freedvReporterDialog)
+        m_freedvReporterDialog->setActiveSlice(s);
+#endif
 
     // Active slice changed → restart dwell window for the new active slice
     if (sliceId != prevId && m_bsAutoSaveTimer) {
@@ -12835,6 +13111,17 @@ void MainWindow::setActiveSliceInternal(int sliceId, bool revealOffscreen)
         updateTMate2Status();
         updateTMate2Indicators();
     }
+#endif
+
+#ifdef HAVE_MQTT
+    // Rewire radio state MQTT publish to the new active slice's freq/mode signals.
+    disconnect(m_radioStateFreqConn);
+    disconnect(m_radioStateModeConn);
+    m_radioStateFreqConn = connect(s, &SliceModel::frequencyChanged,
+                                   this, [this](double) { m_radioStateCoalesceTimer.start(); });
+    m_radioStateModeConn = connect(s, &SliceModel::modeChanged,
+                                   this, [this](const QString&) { m_radioStateCoalesceTimer.start(); });
+    publishRadioStateMqtt();
 #endif
 
     qDebug() << "MainWindow: active slice set to" << sliceId;
@@ -13011,6 +13298,9 @@ void MainWindow::routeCwDecoderOutput()
     if (target == m_cwDecoderApplet) return;
 
     // Disconnect from old applet
+#ifdef HAVE_MQTT
+    disconnect(m_cwStatsConn);
+#endif
     if (m_cwDecoderApplet) {
         disconnect(&m_cwDecoder, &CwDecoder::textDecoded,
                    m_cwDecoderApplet, &PanadapterApplet::appendCwText);
@@ -13046,6 +13336,13 @@ void MainWindow::routeCwDecoderOutput()
                 m_cwDecoderApplet, &PanadapterApplet::appendCwTextTx);
         connect(&m_cwDecoder, &CwDecoder::statsUpdated,
                 m_cwDecoderApplet, &PanadapterApplet::setCwStats);
+#ifdef HAVE_MQTT
+        m_cwStatsConn = connect(&m_cwDecoder, &CwDecoder::statsUpdated,
+                this, [this](float pitchHz, float speedWpm) {
+            m_cwLastPitchHz   = pitchHz;
+            m_cwLastSpeedWpm  = speedWpm;
+        });
+#endif
         connect(m_cwDecoderApplet->lockPitchButton(), &QPushButton::toggled,
                 &m_cwDecoder, &CwDecoder::lockPitch);
         connect(m_cwDecoderApplet->lockSpeedButton(), &QPushButton::toggled,
@@ -13378,6 +13675,48 @@ void MainWindow::scheduleWaterfallLineDurationReconcile(const QString& panId, in
     state.timer->start();
 }
 
+// Per-pan FPS / waterfall-line-duration reconcilers. Wired from
+// wirePanadapter() for fresh pans and from the panadapterReclaimed handler
+// for previous-session pans reclaimed on reconnect — the disconnect path
+// explicitly tears these connections down, and reclaimed pans never re-emit
+// panadapterAdded, so they need this re-wire to keep reconciling.
+void MainWindow::wirePanReconcilers(PanadapterApplet* applet, PanadapterModel* pan)
+{
+    auto* sw = applet->spectrumWidget();
+    if (!sw || !pan)
+        return;
+
+    auto oldFpsConnection = m_panFpsReconcileConnections.take(applet->panId());
+    if (oldFpsConnection)
+        QObject::disconnect(oldFpsConnection);
+
+    auto& fpsState = m_panFpsReconcile[applet->panId()];
+    fpsState.spectrum = sw;
+    m_panFpsReconcileConnections.insert(
+        applet->panId(),
+        connect(pan, &PanadapterModel::fpsReported,
+                this, [this, panId = applet->panId()](int fps) {
+            schedulePanFpsReconcile(panId, fps);
+        }));
+    schedulePanFpsReconcile(applet->panId(), pan->fps());
+
+    auto oldWfLineDurationConnection =
+        m_wfLineDurationReconcileConnections.take(applet->panId());
+    if (oldWfLineDurationConnection)
+        QObject::disconnect(oldWfLineDurationConnection);
+
+    auto& wfLineDurationState = m_wfLineDurationReconcile[applet->panId()];
+    wfLineDurationState.spectrum = sw;
+    m_wfLineDurationReconcileConnections.insert(
+        applet->panId(),
+        connect(pan, &PanadapterModel::waterfallLineDurationReported,
+                this, [this, panId = applet->panId()](int ms) {
+            scheduleWaterfallLineDurationReconcile(panId, ms);
+        }));
+    scheduleWaterfallLineDurationReconcile(applet->panId(),
+                                           pan->waterfallLineDuration());
+}
+
 void MainWindow::wirePanadapter(PanadapterApplet* applet)
 {
     auto* sw = applet->spectrumWidget();
@@ -13513,35 +13852,7 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
         // correct radio-reported range via the pendingDbm guard. (#3034)
         sw->setDbmRange(pan->minDbm(), pan->maxDbm());
 
-        auto oldFpsConnection = m_panFpsReconcileConnections.take(applet->panId());
-        if (oldFpsConnection)
-            QObject::disconnect(oldFpsConnection);
-
-        auto& fpsState = m_panFpsReconcile[applet->panId()];
-        fpsState.spectrum = sw;
-        m_panFpsReconcileConnections.insert(
-            applet->panId(),
-            connect(pan, &PanadapterModel::fpsReported,
-                    this, [this, panId = applet->panId()](int fps) {
-                schedulePanFpsReconcile(panId, fps);
-            }));
-        schedulePanFpsReconcile(applet->panId(), pan->fps());
-
-        auto oldWfLineDurationConnection =
-            m_wfLineDurationReconcileConnections.take(applet->panId());
-        if (oldWfLineDurationConnection)
-            QObject::disconnect(oldWfLineDurationConnection);
-
-        auto& wfLineDurationState = m_wfLineDurationReconcile[applet->panId()];
-        wfLineDurationState.spectrum = sw;
-        m_wfLineDurationReconcileConnections.insert(
-            applet->panId(),
-            connect(pan, &PanadapterModel::waterfallLineDurationReported,
-                    this, [this, panId = applet->panId()](int ms) {
-                scheduleWaterfallLineDurationReconcile(panId, ms);
-            }));
-        scheduleWaterfallLineDurationReconcile(applet->panId(),
-                                               pan->waterfallLineDuration());
+        wirePanReconcilers(applet, pan);
     }
     syncTxWaterfallSliceToSpectrums();
 
@@ -17751,6 +18062,49 @@ void MainWindow::stopFreeDvReporting(int sliceId)
 #endif
 }
 
+#endif  // HAVE_RADE
+
+#ifdef HAVE_WEBSOCKETS
+void MainWindow::showFreeDvReporter()
+{
+    if (!m_freedvReporterDialog) {
+        m_freedvReporterDialog = new FreeDvReporterDialog(this);
+        connect(m_freedvClient, &FreeDvClient::stationsCleared,
+                m_freedvReporterDialog, &FreeDvReporterDialog::onStationsCleared,
+                Qt::QueuedConnection);
+        connect(m_freedvClient, &FreeDvClient::stationUpdated,
+                m_freedvReporterDialog, &FreeDvReporterDialog::onStationUpdated,
+                Qt::QueuedConnection);
+        connect(m_freedvClient, &FreeDvClient::stationRemoved,
+                m_freedvReporterDialog, &FreeDvReporterDialog::onStationRemoved,
+                Qt::QueuedConnection);
+        if (auto* s = activeSlice())
+            m_freedvReporterDialog->setActiveSlice(s);
+        // Seed with current state — bulk_update fires at connect time, before the
+        // dialog exists. Without this, the table fills slowly from live events only.
+        for (const auto& [sid, info] : m_freedvClient->stations().asKeyValueRange())
+            m_freedvReporterDialog->onStationUpdated(sid, info);
+    }
+    // Resolve GPS-aware grid every open — same logic as startFreeDvReporting()
+    // so km/Hdg columns work when GPS grid is active and never written to AppSettings.
+    {
+        auto& cs = AppSettings::instance();
+        QString grid;
+        if (cs.value("FreeDvUseGpsGrid", "True").toString() == "True"
+                && m_radioModel.hasGpsHardware()
+                && !m_radioModel.gpsGrid().isEmpty()) {
+            grid = m_radioModel.gpsGrid();
+        } else {
+            grid = cs.value("FreeDvMyGrid", "").toString().trimmed().toUpper();
+        }
+        if (grid.isEmpty())
+            grid = m_freedvClient->myGrid();
+        m_freedvReporterDialog->setMyGrid(grid);
+    }
+    m_freedvReporterDialog->show();
+    m_freedvReporterDialog->raise();
+    m_freedvReporterDialog->activateWindow();
+}
 #endif
 
 #if defined(Q_OS_MAC) || defined(HAVE_PIPEWIRE)
@@ -19084,6 +19438,54 @@ void MainWindow::onSpectrumReadyForSHistory(quint32 streamId, const QVector<floa
             PerfTelemetry::instance().recordSHistorySkipped();
         }
     }
+}
+
+// ─── Pan Follow ───────────────────────────────────────────────────────────────
+
+void MainWindow::setPanFollow(bool on)
+{
+    disconnect(m_panFollowConn);
+    disconnect(m_panFollowSliceConn);
+
+    if (!on) return;
+
+    // Re-attach helper: wires frequency tracking to whichever slice 0
+    // is currently live. Called on activation and whenever slice 0 is
+    // recreated (radio reconnect, slice re-assignment, etc.).
+    auto attachToSlice0 = [this]() {
+        disconnect(m_panFollowConn);
+
+        auto* s = m_radioModel.slice(0);
+        if (!s) {
+            // No slice yet — uncheck the button so UI matches reality.
+            if (m_titleBar) m_titleBar->setPanFollowChecked(false);
+            return;
+        }
+
+        auto centerPan = [this, s]() {
+            const QString panId = s->panId();
+            if (panId.isEmpty()) return;
+            const double freq = s->frequency();
+            auto* pan = m_radioModel.panadapter(panId);
+            if (pan && qFuzzyCompare(pan->centerMhz(), freq)) return;
+            const QString freqStr = QString::number(freq, 'f', 6);
+            if (pan) pan->applyPanStatus({{"center", freqStr}});
+            m_radioModel.sendCommand(
+                QString("display pan set %1 center=%2").arg(panId, freqStr));
+        };
+
+        centerPan();
+        m_panFollowConn = connect(s, &SliceModel::frequencyChanged,
+                                  this, [centerPan](double) { centerPan(); });
+    };
+
+    attachToSlice0();
+
+    // Re-attach whenever a new slice 0 appears (reconnect / re-assignment).
+    m_panFollowSliceConn = connect(&m_radioModel, &RadioModel::sliceAdded,
+        this, [this, attachToSlice0](SliceModel* s) {
+            if (s && s->sliceId() == 0) attachToSlice0();
+        });
 }
 
 // ─── WFM software demodulator ────────────────────────────────────────────────

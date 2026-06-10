@@ -51,7 +51,13 @@ public:
     // as caption drag zones while keeping controls interactive.
     bool isSystemMoveAreaAt(const QPoint& globalPos) const;
 
+    // Pan Lock accessors. Out-of-line so the header doesn't need to pull in
+    // <QPushButton>; defined alongside the button's setup in TitleBar.cpp.
+    bool isPanFollowChecked() const;
+    void setPanFollowChecked(bool on);
+
 signals:
+    void panFollowToggled(bool on);
     void pcAudioToggled(bool on);
     void masterVolumeChanged(int pct);
     void headphoneVolumeChanged(int pct);
@@ -87,6 +93,7 @@ private:
     QLabel*      m_appNameLabel{nullptr};
     QLabel*      m_otherTxLabel{nullptr};
     QPushButton* m_mfBtn{nullptr};
+    QPushButton* m_panFollowBtn{nullptr};
     QPushButton* m_pcBtn{nullptr};
     QPushButton* m_speakerBtn{nullptr};
     QPushButton* m_headphoneBtn{nullptr};

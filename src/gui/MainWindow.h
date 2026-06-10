@@ -27,6 +27,7 @@
 #include "core/PropForecastClient.h"
 #ifdef HAVE_WEBSOCKETS
 #include "core/FreeDvClient.h"
+#include "gui/FreeDvReporterDialog.h"
 #endif
 #include <QThread>
 #ifdef HAVE_SERIALPORT
@@ -87,6 +88,7 @@ class NetworkDiagnosticsDialog;
 class AgcCalibrationDialog;
 class MemoryDialog;
 class PropDashboardDialog;
+class UpdateChecker;
 class TxBandDialog;
 class AetherDspDialog;
 class MqttSettingsDialog;
@@ -270,6 +272,7 @@ private:
     void updateSplitState();
     void disableSplit();
     void wirePanadapter(PanadapterApplet* applet);
+    void wirePanReconcilers(PanadapterApplet* applet, PanadapterModel* pan);
     void schedulePanFpsReconcile(const QString& panId, int reportedFps);
     void scheduleWaterfallLineDurationReconcile(const QString& panId, int reportedMs);
     void reassertUnmutedSliceAudioForPan(const QString& panId);
@@ -355,6 +358,9 @@ private:
 
     void showMemoryDialog();
     void showQuickAddMemoryDialog(const QString& preferredPanId = {});
+#ifdef HAVE_WEBSOCKETS
+    void showFreeDvReporter();
+#endif
     void updateKeyerAvailability(const QString& mode);
     void showNr2ParamPopup(const QPoint& globalPos);
     void showNr4ParamPopup(const QPoint& globalPos);
@@ -363,6 +369,7 @@ private:
 #ifdef HAVE_MQTT
     void showMqttSettingsDialog();
     void publishCwDecodeMqtt(const QString& text, float cost, bool rx);
+    void publishRadioStateMqtt();
 #endif
     void applyPanLayout(const QString& layoutId);
     void createPansSequentially(const QString& layoutId, int total,
@@ -465,7 +472,8 @@ private:
     // One-time settings migration from the old dual-server key schema.
     void migrateCatSettings();
 #ifdef HAVE_WEBSOCKETS
-    TciServer*        m_tciServer{nullptr};
+    TciServer*             m_tciServer{nullptr};
+    FreeDvReporterDialog*  m_freedvReporterDialog{nullptr};
 #endif
     SmartLinkClient   m_smartLink;
     WanConnection     m_wanConnection;
@@ -474,12 +482,26 @@ private:
     PgxlConnection    m_pgxlConn;        // direct TCP 9008 to PGXL for telemetry
     BandPlanManager*  m_bandPlanMgr{nullptr};
     CwDecoder         m_cwDecoder;
+    float             m_cwLastPitchHz{0.0f};
+    float             m_cwLastSpeedWpm{0.0f};
     CwDecoder         m_cwDecoderTx;
     RttyDecoder       m_rttyDecoder;
     DxClusterClient*   m_dxCluster{nullptr};
     DxClusterClient*   m_rbnClient{nullptr};
 #ifdef HAVE_MQTT
     MqttClient*        m_mqttClient{nullptr};
+    QMetaObject::Connection m_radioStateFreqConn;
+    QMetaObject::Connection m_radioStateModeConn;
+    QTimer                  m_radioStateCoalesceTimer;
+    QMetaObject::Connection m_cwStatsConn;
+    QMetaObject::Connection m_cwxSpeedRestoreConn;
+    int               m_cwxSavedWpm{0};
+    int               m_cwxSavedHz{0};
+    int               m_cwxSentWpm{0};
+    int               m_cwxSentHz{0};
+    bool              m_cwxTransmitting{false};
+    bool              m_cwxPublishedTxTrue{false};
+    QTimer            m_cwxTxEndTimer;
 #endif
     WsjtxClient*       m_wsjtxClient{nullptr};
     SpotCollectorClient* m_spotCollectorClient{nullptr};
@@ -730,10 +752,14 @@ private:
     QLabel* m_networkLabel{nullptr};
     QTimer m_networkTooltipRefreshTimer;
     QTimer m_perfHeartbeatTimer;
-    QLabel* m_tgxlSeparator{nullptr};
-    QLabel* m_tgxlIndicator{nullptr};
-    QLabel* m_pgxlSeparator{nullptr};
-    QLabel* m_pgxlIndicator{nullptr};
+    QLabel*  m_tgxlSeparator{nullptr};
+    QWidget* m_tgxlContainer{nullptr};
+    QLabel*  m_tgxlIndicator{nullptr};   // top row: "TUN"
+    QLabel*  m_tgxlStateLabel{nullptr};  // bottom row: OPERATE / BYPASS / STANDBY
+    QLabel*  m_pgxlSeparator{nullptr};
+    QWidget* m_pgxlContainer{nullptr};
+    QLabel*  m_pgxlIndicator{nullptr};   // top row: "AMP"
+    QLabel*  m_pgxlStateLabel{nullptr};  // bottom row: OPERATE / STANDBY
     QLabel* m_txIndicator{nullptr};
     QLabel* m_gpsDateLabel{nullptr};
     QLabel* m_gpsTimeLabel{nullptr};
@@ -897,6 +923,7 @@ private:
     bool m_waitingForFirstPanadapterFrame{false};
     QString m_panadapterConnectionAnimationLabel;
     ShortcutManager m_shortcutManager;
+    UpdateChecker* m_updateChecker{nullptr};
 
 #ifdef HAVE_RADE
     RADEEngine* m_radeEngine{nullptr};
@@ -924,6 +951,11 @@ private:
     void onFdvMeterUpdated(int index, float value);
     void onFdvMetersChanged();
 #endif
+
+    // Pan Follow — keeps the panadapter centered on Slice A frequency
+    QMetaObject::Connection m_panFollowConn;
+    QMetaObject::Connection m_panFollowSliceConn;
+    void setPanFollow(bool on);
 
     WfmDemodulator* m_wfmDemod{nullptr};
     int             m_wfmSliceId{-1};

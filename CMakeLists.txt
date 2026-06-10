@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(AetherSDR VERSION 26.6.1.1 LANGUAGES C CXX)
+project(AetherSDR VERSION 26.6.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -549,6 +549,7 @@ set(CORE_SOURCES
     src/core/ProfileTransfer.cpp
     src/core/QsoRecorder.cpp
     src/core/FirmwareStager.cpp
+    src/core/UpdateChecker.cpp
     src/core/OleCompoundFile.cpp
     src/core/CabExtractor.cpp
     src/core/RNNoiseFilter.cpp
@@ -581,6 +582,7 @@ set(CORE_SOURCES
     src/core/WfmDsp.cpp
     src/core/WaveOutWriter.cpp
     src/core/tnc/AetherAx25LibmodemShim.cpp
+    src/core/tnc/HdlcCodec.cpp
     src/core/tnc/Ax25FrameFormatter.cpp
     src/core/tnc/Ax25.cpp
     src/core/tnc/Ax25Connection.cpp
@@ -1127,7 +1129,11 @@ endif()
 
 if(Qt6WebSockets_FOUND)
     target_compile_definitions(AetherSDR PRIVATE HAVE_WEBSOCKETS)
-    target_sources(AetherSDR PRIVATE src/core/FreeDvClient.cpp)
+    target_sources(AetherSDR PRIVATE
+        src/core/FreeDvClient.cpp
+        src/gui/FreeDvReporterDialog.cpp
+        src/gui/FreeDvReporterModel.cpp
+    )
     target_link_libraries(AetherSDR PRIVATE Qt6::WebSockets)
 endif()
 
@@ -1888,6 +1894,14 @@ add_executable(xvtr_policy_test
 target_include_directories(xvtr_policy_test PRIVATE src)
 target_link_libraries(xvtr_policy_test PRIVATE Qt6::Core)
 
+# #3449 — VITA-49 waterfall tile frequency decode (no 1 GHz ceiling)
+add_executable(vita_tile_frequency_test
+    tests/vita_tile_frequency_test.cpp
+)
+target_include_directories(vita_tile_frequency_test PRIVATE src)
+target_link_libraries(vita_tile_frequency_test PRIVATE Qt6::Core)
+add_test(NAME vita_tile_frequency_test COMMAND vita_tile_frequency_test)
+
 add_executable(frequency_entry_parser_test
     tests/frequency_entry_parser_test.cpp
     src/gui/FrequencyEntryParser.cpp
@@ -1988,6 +2002,7 @@ add_test(NAME ax25_frame_formatter_test COMMAND ax25_frame_formatter_test)
 add_executable(ax25_libmodem_shim_test
     tests/ax25_libmodem_shim_test.cpp
     src/core/tnc/AetherAx25LibmodemShim.cpp
+    src/core/tnc/HdlcCodec.cpp
     src/core/tnc/Ax25FrameFormatter.cpp
     src/core/tnc/Ax25.cpp
     src/core/tnc/KissFraming.cpp
@@ -2002,6 +2017,14 @@ add_executable(ax25_libmodem_shim_test
 target_include_directories(ax25_libmodem_shim_test PRIVATE src)
 target_link_libraries(ax25_libmodem_shim_test PRIVATE Qt6::Core aether_libmodem_core)
 add_test(NAME ax25_libmodem_shim_test COMMAND ax25_libmodem_shim_test)
+
+add_executable(hdlc_codec_test
+    tests/hdlc_codec_test.cpp
+    src/core/tnc/HdlcCodec.cpp
+)
+target_include_directories(hdlc_codec_test PRIVATE src)
+target_link_libraries(hdlc_codec_test PRIVATE aether_libmodem_core)
+add_test(NAME hdlc_codec_test COMMAND hdlc_codec_test)
 
 # Offline AX.25 decode diagnostic: replays a captured WAV through the decoder.
 # Not a ctest (needs an input file); built on demand for troubleshooting.
