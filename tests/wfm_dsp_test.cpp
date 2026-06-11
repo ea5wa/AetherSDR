@@ -13,6 +13,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <numbers>   // std::numbers::pi — M_PI needs _USE_MATH_DEFINES on MSVC
 #include <string>
 #include <vector>
 
@@ -38,12 +39,12 @@ std::vector<float> makeFm(int rate, int frames, double offsetHz,
 {
     std::vector<float> iq(static_cast<size_t>(frames) * 2);
     double phase = 0.0;
-    const double twoPi = 2.0 * M_PI;
+    const double twoPi = 2.0 * std::numbers::pi;
     for (int i = 0; i < frames; ++i) {
         const double t = static_cast<double>(i) / rate;
         const double instFreq = offsetHz + devHz * std::cos(twoPi * toneHz * t);
         phase += twoPi * instFreq / rate;
-        if (phase > M_PI) phase -= twoPi;
+        if (phase > std::numbers::pi) phase -= twoPi;
         iq[2 * static_cast<size_t>(i)]     = static_cast<float>(std::cos(phase));
         iq[2 * static_cast<size_t>(i) + 1] = static_cast<float>(std::sin(phase));
     }
@@ -63,7 +64,7 @@ double toneAmplitude(const std::vector<float>& x, size_t from, size_t count,
                      double toneHz)
 {
     double re = 0.0, im = 0.0;
-    const double w = 2.0 * M_PI * toneHz / WfmDsp::kAudioRate;
+    const double w = 2.0 * std::numbers::pi * toneHz / WfmDsp::kAudioRate;
     for (size_t i = 0; i < count; ++i) {
         const double v = x[from + i];
         re += v * std::cos(w * static_cast<double>(i));

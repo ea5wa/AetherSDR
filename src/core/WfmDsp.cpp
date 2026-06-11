@@ -4,6 +4,7 @@
 #include <QByteArray>
 #include <algorithm>
 #include <cmath>
+#include <numbers>   // std::numbers::pi — M_PI needs _USE_MATH_DEFINES on MSVC
 
 namespace AetherSDR {
 
@@ -33,7 +34,7 @@ static std::array<float, WfmDsp::kFirTaps> buildFirLP()
     constexpr int   M  = WfmDsp::kFirOrder;   // 94
     constexpr float fc = static_cast<float>(WfmDsp::kLpCutoffHz)
                        / static_cast<float>(WfmDsp::kAudioRate); // 20000/48000
-    const float pi = static_cast<float>(M_PI);
+    const float pi = static_cast<float>(std::numbers::pi);
 
     std::array<float, WfmDsp::kFirTaps> h{};
     float sum = 0.0f;
@@ -103,7 +104,7 @@ void WfmDsp::setFreqOffsetHz(float offsetHz)
 {
     // Mix DOWN: a negative rotation moves +offsetHz to 0 Hz. Only the step
     // changes; m_ncoPhase keeps accumulating → the retune is phase-continuous.
-    m_ncoStep = -2.0 * M_PI * static_cast<double>(offsetHz) / m_iqRate;
+    m_ncoStep = -2.0 * std::numbers::pi * static_cast<double>(offsetHz) / m_iqRate;
 }
 
 void WfmDsp::process(const float* iqInterleaved, int frames,
@@ -123,8 +124,8 @@ void WfmDsp::process(const float* iqInterleaved, int frames,
         m_workI[static_cast<size_t>(i)] = I * c - Q * s;
         m_workQ[static_cast<size_t>(i)] = I * s + Q * c;
         m_ncoPhase += m_ncoStep;
-        if (m_ncoPhase > M_PI)       m_ncoPhase -= 2.0 * M_PI;
-        else if (m_ncoPhase < -M_PI) m_ncoPhase += 2.0 * M_PI;
+        if (m_ncoPhase > std::numbers::pi)       m_ncoPhase -= 2.0 * std::numbers::pi;
+        else if (m_ncoPhase < -std::numbers::pi) m_ncoPhase += 2.0 * std::numbers::pi;
     }
 
     // [2] resample I and Q to exactly 48 kHz (identical twins ⇒ identical
@@ -148,7 +149,7 @@ void WfmDsp::process(const float* iqInterleaved, int frames,
     float prevI = m_prevI;
     float prevQ = m_prevQ;
 
-    const float pi   = static_cast<float>(M_PI);
+    const float pi   = static_cast<float>(std::numbers::pi);
     const float norm = kGain / pi;   // atan2 ∈ [−π,π] → disc ∈ [−kGain, kGain]
 
     for (int i = 0; i < n; ++i) {
