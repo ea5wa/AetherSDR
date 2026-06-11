@@ -15234,6 +15234,15 @@ void MainWindow::setPanFollow(bool on)
         auto centerPan = [this, s]() {
             const QString panId = s->panId();
             if (panId.isEmpty()) return;
+            // WFM holds its pan fixed: Doppler rides the demodulator's NCO,
+            // and recentring underneath it would desync the NCO offset until
+            // the next slice retune. While WFM is active on this pan, WFM
+            // wins and Pan Follow stands down. (Precedence is a UX call —
+            // flagged for maintainer review in the WFM PR.)
+            if (m_wfmSliceId >= 0) {
+                auto* wfmSlice = m_radioModel.slice(m_wfmSliceId);
+                if (wfmSlice && wfmSlice->panId() == panId) return;
+            }
             const double freq = s->frequency();
             auto* pan = m_radioModel.panadapter(panId);
             if (pan && qFuzzyCompare(pan->centerMhz(), freq)) return;
