@@ -139,6 +139,7 @@ enum class FlexWheelMode {
     Power,
     Rit,
     Xit,
+    SliceAudio,
     HeadphoneVolume,
     AgcT,
     Apf,

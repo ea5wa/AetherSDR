@@ -637,6 +637,10 @@ set(MODEL_SOURCES
 
 set(GUI_SOURCES
     src/gui/MainWindow.cpp
+    src/gui/MainWindowHelpers.cpp
+    src/gui/MainWindow_Controllers.cpp
+    src/gui/MainWindow_Menus.cpp
+    src/gui/MainWindow_Shortcuts.cpp
     src/gui/AgcCalibrationDialog.cpp
     src/gui/AudioDeviceChangeDialog.cpp
     src/gui/WfmDeviceDialog.cpp
@@ -1694,6 +1698,15 @@ add_executable(model_capabilities_test
 target_include_directories(model_capabilities_test PRIVATE src)
 target_link_libraries(model_capabilities_test PRIVATE Qt6::Core)
 add_test(NAME model_capabilities_test COMMAND model_capabilities_test)
+
+add_executable(radio_discovery_test
+    tests/radio_discovery_test.cpp
+    src/core/RadioDiscovery.cpp
+)
+target_include_directories(radio_discovery_test PRIVATE src)
+target_compile_definitions(radio_discovery_test PRIVATE AETHERSDR_TESTING)
+target_link_libraries(radio_discovery_test PRIVATE Qt6::Core Qt6::Network)
+add_test(NAME radio_discovery_test COMMAND radio_discovery_test)
 
 add_executable(client_quindar_test
     tests/client_quindar_test.cpp
