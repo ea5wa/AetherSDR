@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 > **Versioning:** Starting with **v26.5.1**, AetherSDR moves to **CalVer**
 > (`YY.M.patch`). Earlier tags used semver through v0.9.8.
 
+## [Unreleased]
+
+- **WFM software demodulator** for satellite data work (G3RUH 9600 bd):
+  DAX IQ → SkyRoof-parity DSP chain (phase-continuous NCO Doppler
+  correction, exact 48 kHz resampling, flat atan2 discriminator) → virtual
+  audio cable for HS-SoundModem. Per-slice WFM toggle on FM modes.
+- **Behaviour change (CAT):** rigctl/TCI `set_freq` retunes that stay
+  within the panadapter span no longer recenter the pan (`autopan=0`);
+  cross-band tunes still recenter, preserving the #536 behaviour for the
+  case it was written for. Satellite trackers issuing Doppler steps every
+  few seconds previously yanked the pan on every step.
+
 ## [v26.6.2] — 2026-06-07
 
 ### Theming + HID controllers + packet-radio suite + Windows Store + 206-commit consolidation

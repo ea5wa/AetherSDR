@@ -11,6 +11,7 @@
 #include "models/TransmitModel.h"
 #include "Theme.h"
 #include "core/AppSettings.h"
+#include "InteractionSettings.h"
 
 #include <QDateTime>
 #include <QPainter>
@@ -363,6 +364,7 @@ void VfoWidget::wheelEvent(QWheelEvent* ev)
     }
 
     if (steps != 0) {
+        if (reverseMouseWheel()) steps = -steps;  // #3302
         double newMhz = m_slice->frequency() + steps * stepHz / 1e6;
         emit stepTuneRequested(newMhz);
     }
@@ -995,6 +997,13 @@ void VfoWidget::buildTabContent()
         m_escPhaseLbl->setFixedWidth(28);
         m_escPhaseLbl->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         escTopRow->addWidget(m_escPhaseLbl);
+        m_escPlus180Btn = new QPushButton("+180");
+        m_escPlus180Btn->setAccessibleName("Add 180 degrees to ESC phase");
+        m_escPlus180Btn->setToolTip("Shift ESC phase by 180\u00B0 to check the out-of-phase null. Click again to return.");
+        m_escPlus180Btn->setFixedHeight(20);
+        m_escPlus180Btn->setFixedWidth(40);
+        m_escPlus180Btn->setStyleSheet(kDspToggle);
+        escTopRow->addWidget(m_escPlus180Btn);
         escVbox->addLayout(escTopRow);
 
         // Gain vertical slider + polar plot row
@@ -1119,7 +1128,9 @@ void VfoWidget::buildTabContent()
                 m_slice->setDiversity(on);
             // ESC panel only on diversity parent, not child
             m_escPanel->setVisible(on && m_slice && !m_slice->isDiversityChild());
-            resize(sizeHint());
+            // setVisible() only posts a LayoutRequest; adjustSize() activates the
+            // layout first so the panel collapses immediately (#3383)
+            adjustSize();
         });
         connect(m_escBtn, &QPushButton::toggled, this, [this](bool on) {
             if (!m_updatingFromModel && m_slice)
@@ -1132,6 +1143,14 @@ void VfoWidget::buildTabContent()
             m_phaseKnob->setPhase(rad);
             if (!m_updatingFromModel && m_slice)
                 m_slice->setEscPhaseShift(rad);
+        });
+        // +180 momentary: integer-domain mod keeps two-press round-trip exact.
+        connect(m_escPlus180Btn, &QPushButton::clicked, this, [this]() {
+            if (m_updatingFromModel || !m_slice) return;
+            constexpr int kStepsPer180 = 36;   // 180° / 5°
+            constexpr int kStepsPerFull = 72;  // 360° / 5°
+            const int v = (m_escPhaseSlider->value() + kStepsPer180) % kStepsPerFull;
+            m_escPhaseSlider->setValue(v);
         });
         connect(m_escGainSlider, &QSlider::valueChanged, this, [this](int v) {
             float gain = v / 100.0f;
@@ -2218,7 +2237,7 @@ void VfoWidget::setDiversityAllowed(bool allowed)
     // ESC panel only visible when DIV is active on a dual-SCU radio
     if (m_escPanel && !allowed) {
         m_escPanel->setVisible(false);
-        resize(sizeHint());
+        adjustSize();  // flush pending layout before sizing (#3383)
     }
 }
 
@@ -2840,7 +2859,7 @@ void VfoWidget::setSlice(SliceModel* slice)
         QSignalBlocker sb(m_divBtn);
         m_divBtn->setChecked(on);
         m_escPanel->setVisible(on && !m_slice->isDiversityChild());
-        resize(sizeHint());
+        adjustSize();  // flush pending layout before sizing (#3383)
     });
     // ESC sync — phase is in radians, display as degrees
     {

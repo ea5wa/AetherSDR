@@ -3536,7 +3536,11 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_appletPanel->rxApplet(), &RxApplet::wfmActivated,
             this, [this](bool on, int sliceId) {
         if (on) activateWFM(sliceId);
-        else    deactivateWFM();
+        // Only the WFM slice may deactivate (a mode change on another slice
+        // must not kill a running demod), and not during the activation
+        // cooldown, which debounces the slice-sync churn that emits spurious
+        // off events right after activation.
+        else if (sliceId == m_wfmSliceId && !m_wfmCooldown) deactivateWFM();
     });
 
     // ── Tuning step size ───────────────────────────────────────────────────
@@ -15075,7 +15079,8 @@ void MainWindow::wireVfoWidget(VfoWidget* w, SliceModel* s)
 
     connect(w, &VfoWidget::wfmActivated, this, [this](bool on, int sliceId) {
         if (on) activateWFM(sliceId);
-        else    deactivateWFM();
+        // Same policy as the RxApplet handler: slice-gated, cooldown-debounced.
+        else if (sliceId == m_wfmSliceId && !m_wfmCooldown) deactivateWFM();
     });
 
     // AetherDSP button on the per-slice DSP tab — same entry point as the
@@ -19579,10 +19584,12 @@ void MainWindow::activateWFM(int sliceId)
     });
 }
 
+// Always cleans up — the cooldown debounce lives in the wfmActivated
+// handlers, NOT here, so activateWFM's switch-slice path can never leak a
+// running demodulator (two demods writing to the same VAC device).
 void MainWindow::deactivateWFM()
 {
     if (m_wfmSliceId < 0) return;
-    if (m_wfmCooldown) return;
 
     disconnect(m_wfmFreqConn);
 

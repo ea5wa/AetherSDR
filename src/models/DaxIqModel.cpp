@@ -2,6 +2,7 @@
 #include "core/LogManager.h"
 
 #include <QDebug>
+#include <QMetaMethod>
 #include <QProcess>
 #include <QtEndian>
 #include <cmath>
@@ -25,7 +26,7 @@ DaxIqModel::DaxIqModel(QObject* parent)
     m_worker->moveToThread(&m_workerThread);
     connect(&m_workerThread, &QThread::finished, m_worker, &QObject::deleteLater);
     connect(m_worker, &DaxIqWorker::levelReady,   this, &DaxIqModel::iqLevelReady);
-    connect(m_worker, &DaxIqWorker::samplesReady, this, &DaxIqModel::iqSamplesReady);
+    connect(m_worker, &DaxIqWorker::samplesReady, this, &DaxIqModel::relayIqSamples);
     m_workerThread.start();
 }
 
@@ -41,6 +42,20 @@ const DaxIqModel::IqStream& DaxIqModel::stream(int channel) const
     int idx = channelIndex(channel);
     if (idx < 0 || idx >= NUM_CHANNELS) return empty;
     return m_streams[idx];
+}
+
+void DaxIqModel::relayIqSamples(int channel, const QByteArray& iqBytes, int sampleRate)
+{
+    // Convert to QVector<float> only when a software demodulator is actually
+    // connected — otherwise every IQ packet would heap-allocate a copy just
+    // to be dropped, taxing the level-meter path for all users.
+    static const QMetaMethod kSig = QMetaMethod::fromSignal(&DaxIqModel::iqSamplesReady);
+    if (!isSignalConnected(kSig)) return;
+
+    QVector<float> samples(iqBytes.size() / static_cast<int>(sizeof(float)));
+    std::memcpy(samples.data(), iqBytes.constData(),
+                static_cast<size_t>(samples.size()) * sizeof(float));
+    emit iqSamplesReady(channel, std::move(samples), sampleRate);
 }
 
 void DaxIqModel::createStream(int channel)
@@ -133,10 +148,6 @@ void DaxIqModel::handleStreamRemoved(quint32 streamId)
 
 void DaxIqModel::feedRawIqPacket(int channel, const QByteArray& rawPayload, int sampleRate)
 {
-    static int s_feedCount = 0;
-    if (++s_feedCount <= 3)
-        qDebug() << "DaxIqModel::feedRawIqPacket ch=" << channel
-                 << "size=" << rawPayload.size() << "rate=" << sampleRate;
     QMetaObject::invokeMethod(m_worker,
         [this, channel, rawPayload, sampleRate] {
             m_worker->processIqPacket(channel, rawPayload, sampleRate);
@@ -224,7 +235,6 @@ void DaxIqWorker::destroyPipe(int channel)
 
 void DaxIqWorker::processIqPacket(int channel, const QByteArray& rawPayload, int sampleRate)
 {
-    Q_UNUSED(sampleRate);
     int idx = channel - 1;
     if (idx < 0 || idx >= DaxIqModel::NUM_CHANNELS) return;
 
@@ -255,14 +265,11 @@ void DaxIqWorker::processIqPacket(int channel, const QByteArray& rawPayload, int
         m_sumSq[idx] = 0.0;
     }
 
-    // Emit byte-swapped samples for software demodulators (all platforms)
-    QVector<float> samples(numFloats);
-    std::memcpy(samples.data(), swapped.constData(), swapped.size());
-    static int s_emitCount = 0;
-    if (++s_emitCount <= 3)
-        qDebug() << "DaxIqWorker: emitting samplesReady ch=" << channel
-                 << "samples=" << numSamples;
-    emit samplesReady(channel, std::move(samples), sampleRate);
+    // Relay byte-swapped samples for software demodulators (all platforms).
+    // QByteArray is implicitly shared: this refs the existing buffer, no
+    // copy — the float conversion happens in DaxIqModel::relayIqSamples and
+    // only when something is actually listening (i.e. WFM is active).
+    emit samplesReady(channel, swapped, sampleRate);
 
     // Write to pipe (non-blocking, Linux/macOS only)
 #ifndef Q_OS_WIN
