@@ -6455,6 +6455,14 @@ void MainWindow::onConnectionStateChanged(bool connected)
         return;
     }
 
+    // XVTR antenna auto-switch (#3531): drop all per-slice owning-transverter
+    // state on any connection transition. Pruning only via sliceRemoved goes
+    // stale across reconnects — pruneStaleSessionModels() emits sliceRemoved
+    // AFTER the new session's slices appear, so a recreated slice that lands
+    // on the same transverter index would see prevIdx == xvtrIdx at creation
+    // time and skip the switch, then lose its entry to the late prune.
+    m_sliceXvtrIndex.clear();
+
     m_connPanel->setConnected(connected);
 
     // Pause/resume the discovery re-bind loop in step with the connection
@@ -7428,8 +7436,7 @@ void MainWindow::evaluateXvtrAutoAntennas(SliceModel* slice)
     if (xvtrIdx < 0) {
         return;
     }
-    const auto ports = AetherSDR::loadXvtrAutoAntennaPorts(xvtrIdx);
-    if (!ports.isConfigured()) {
+    if (!AetherSDR::loadXvtrAutoAntennaPorts(xvtrIdx).isConfigured()) {
         return;
     }
 
@@ -7438,9 +7445,10 @@ void MainWindow::evaluateXvtrAutoAntennas(SliceModel* slice)
     // the deferred vfo push in TciServer::wireSlice) — then re-validate the
     // slice is still on this transverter before touching its antennas; if the
     // user already jumped elsewhere, sending rxant/txant would key the wrong
-    // port.
+    // port. The ports are reloaded at fire time so a settings change inside
+    // the window can't send a just-cleared port.
     QPointer<SliceModel> guard(slice);
-    QTimer::singleShot(600, this, [this, guard, xvtrIdx, ports]() {
+    QTimer::singleShot(600, this, [this, guard, xvtrIdx]() {
         if (!guard) {
             return;
         }
@@ -7452,6 +7460,10 @@ void MainWindow::evaluateXvtrAutoAntennas(SliceModel* slice)
         const auto xvtrs = xvtrPolicyBandsFrom(m_radioModel.xvtrList());
         if (XvtrPolicy::transverterIndexForFrequency(s->frequency(), xvtrs)
                 != xvtrIdx) {
+            return;
+        }
+        const auto ports = AetherSDR::loadXvtrAutoAntennaPorts(xvtrIdx);
+        if (!ports.isConfigured()) {
             return;
         }
         qCDebug(lcProtocol).noquote().nospace()

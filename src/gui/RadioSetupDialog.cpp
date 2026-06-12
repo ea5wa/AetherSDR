@@ -2793,6 +2793,10 @@ QWidget* RadioSetupDialog::buildXvtrTab()
             "QPushButton:hover { background: #502020; }");
         connect(removeBtn, &QPushButton::clicked, pg, [this, idx, xvtrTabs, pg] {
             m_model->sendCommand(QString("xvtr remove %1").arg(idx));
+            // Drop the saved auto-antenna mapping too — the radio reuses xvtr
+            // indices, so a transverter created later would silently inherit
+            // this one's ports (#3531 review).
+            AetherSDR::saveXvtrAutoAntennaPorts(idx, {});
             int tabIdx = xvtrTabs->indexOf(pg);
             if (tabIdx >= 0) xvtrTabs->removeTab(tabIdx);
         });
