@@ -2020,8 +2020,13 @@ void MainWindow::wireExternalControllers()
             this, &MainWindow::handleFlexControlButton);
     connect(m_flexControl, &FlexControlManager::buttonPressed,
             this, [this](int button, int action) {
-        if (m_hidEncoder->isTMate2())
+        // m_hidEncoder / noteTMate2Interaction only exist under HAVE_HIDAPI;
+        // this block is guarded by HAVE_SERIALPORT, so a serialport-without-
+        // hidapi build (e.g. Windows before setup-hidapi.ps1) hits both.
+#ifdef HAVE_HIDAPI
+        if (m_hidEncoder && m_hidEncoder->isTMate2())
             noteTMate2Interaction();
+#endif
         if (m_flexControlDialog)
             m_flexControlDialog->reflectButtonPress(button, action);
     });
