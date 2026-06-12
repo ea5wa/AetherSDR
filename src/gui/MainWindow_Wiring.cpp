@@ -1694,7 +1694,6 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
             QTimer::singleShot(300, this, [this, panId = applet->panId()]() {
                 reassertUnmutedSliceAudioForPan(panId);
             });
-            applyXvtrAutoAntennas(applet->panId(), stackKey);
         }
     });
 

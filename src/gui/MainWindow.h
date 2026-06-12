@@ -240,7 +240,7 @@ private:
     bool panFollowEnabled() const;
     BandStackPreselectResult preselectBandStackForTune(SliceModel* slice, double mhz,
                                                        const char* source);
-    void applyXvtrAutoAntennas(const QString& panId, const QString& stackKey);
+    void evaluateXvtrAutoAntennas(SliceModel* slice);
     void applyTuneRequest(SliceModel* slice, double mhz,
                           TuneIntent intent, const char* source);
     void applyPanRangeRequest(const QString& panId, double centerMhz,
@@ -772,6 +772,9 @@ private:
 
     // Active slice tracking for multi-slice support
     int m_activeSliceId{-1};
+    // Per-slice owning-transverter index (-1 = not on a transverter band),
+    // for edge-triggered XVTR antenna auto-switch (#3531)
+    QHash<int, int> m_sliceXvtrIndex;
     bool m_splitActive{false};
     bool m_leanMode{false};  // global lean render mode state (#3283)
     // Pre-lean WaveApplet active state, captured on Lean activation so the

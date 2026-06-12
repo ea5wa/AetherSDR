@@ -1511,6 +1511,20 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::onSliceAdded);
     connect(&m_radioModel, &RadioModel::sliceRemoved,
             this, &MainWindow::onSliceRemoved);
+    // XVTR antenna auto-switch (#3531): evaluate every slice on every
+    // frequency change, plus once at creation — a Flex band change recreates
+    // the slice already inside the transverter band, so no frequencyChanged
+    // may fire afterwards (same trap as the deferred vfo push, #2824).
+    // Wired here rather than in onSliceAdded because that handler bails out
+    // during layout transitions.
+    connect(&m_radioModel, &RadioModel::sliceAdded,
+            this, [this](SliceModel* s) {
+        connect(s, &SliceModel::frequencyChanged,
+                this, [this, s](double) { evaluateXvtrAutoAntennas(s); });
+        evaluateXvtrAutoAntennas(s);
+    });
+    connect(&m_radioModel, &RadioModel::sliceRemoved,
+            this, [this](int id) { m_sliceXvtrIndex.remove(id); });
     connect(&m_radioModel, &RadioModel::memoryChanged,
             this, &MainWindow::syncMemorySpot);
     connect(&m_radioModel, &RadioModel::memoryRemoved,
@@ -7174,7 +7188,6 @@ bool MainWindow::activateMemorySpot(int memoryIndex, const QString& preferredPan
                 QTimer::singleShot(300, this, [this, slicePanId]() {
                     reassertUnmutedSliceAudioForPan(slicePanId);
                 });
-                applyXvtrAutoAntennas(slicePanId, stackKeyResult.key);
             } else {
                 qCWarning(lcProtocol).noquote().nospace()
                     << "MainWindow: memory recall cannot preselect band stack memory="
@@ -7384,69 +7397,76 @@ MainWindow::BandStackPreselectResult MainWindow::preselectBandStackForTune(
     QTimer::singleShot(300, this, [this, panId = slice->panId()]() {
         reassertUnmutedSliceAudioForPan(panId);
     });
-    applyXvtrAutoAntennas(slice->panId(), stackKeyResult.key);
     return BandStackPreselectResult::Selected;
 }
 
-void MainWindow::applyXvtrAutoAntennas(const QString& panId, const QString& stackKey)
+void MainWindow::evaluateXvtrAutoAntennas(SliceModel* slice)
 {
-    // Client-side antenna auto-switch (#3531). Only X<n> band-stack keys
-    // (transverter bands) participate; native bands stay radio-authoritative.
-    // The per-XVTR ports are configured in Radio Setup → XVTR and stored in
-    // AppSettings because the radio does not persist per-XVTR antenna
-    // mappings. Empty ports (the "(no change)" default) disable this.
-    if (panId.isEmpty() || !stackKey.startsWith('X')) {
+    // Client-side antenna auto-switch (#3531), evaluated for every slice on
+    // every frequency change so any path that moves a slice onto a
+    // transverter band participates: band selector, direct tune, CAT/TCI,
+    // memory recall, or a slice recreated by a Flex band change. The per-XVTR
+    // ports are configured in Radio Setup → XVTR and stored in AppSettings
+    // because the radio does not persist per-XVTR antenna mappings; empty
+    // ports (the "(no change)" default) disable this.
+    //
+    // Edge-triggered on the owning-transverter index: retunes inside the
+    // band, and manual antenna overrides while on it, are left alone. When a
+    // slice leaves a transverter band nothing is restored — the user's last
+    // explicit antenna choice per native band stays radio-authoritative.
+    if (!slice) {
         return;
     }
-    bool indexOk = false;
-    const int xvtrIdx = stackKey.mid(1).toInt(&indexOk);
-    if (!indexOk) {
+    const auto xvtrs = xvtrPolicyBandsFrom(m_radioModel.xvtrList());
+    const int xvtrIdx =
+        XvtrPolicy::transverterIndexForFrequency(slice->frequency(), xvtrs);
+    const int prevIdx = m_sliceXvtrIndex.value(slice->sliceId(), -1);
+    if (xvtrIdx == prevIdx) {
         return;
     }
-
+    m_sliceXvtrIndex[slice->sliceId()] = xvtrIdx;
+    if (xvtrIdx < 0) {
+        return;
+    }
     const auto ports = AetherSDR::loadXvtrAutoAntennaPorts(xvtrIdx);
     if (!ports.isConfigured()) {
         return;
     }
-    const QString rxAnt = ports.rx;
-    const QString txAnt = ports.tx;
 
-    // A Flex band change (display pan set band=) tears down and recreates the
-    // slice; recreated slices settle in ~250-340 ms observed (see the deferred
-    // vfo push in TciServer::wireSlice). Defer, then verify the settled slice
-    // actually landed on this transverter before touching its antennas — if
-    // the band change failed or the user already jumped elsewhere, sending
-    // rxant/txant would key the wrong port.
-    QTimer::singleShot(600, this, [this, panId, xvtrIdx, rxAnt, txAnt]() {
+    // Defer so the radio's own band-stack restore (frequency, mode, antenna)
+    // finishes first — recreated slices settle in ~250-340 ms observed (see
+    // the deferred vfo push in TciServer::wireSlice) — then re-validate the
+    // slice is still on this transverter before touching its antennas; if the
+    // user already jumped elsewhere, sending rxant/txant would key the wrong
+    // port.
+    QPointer<SliceModel> guard(slice);
+    QTimer::singleShot(600, this, [this, guard, xvtrIdx, ports]() {
+        if (!guard) {
+            return;
+        }
+        SliceModel* s = guard;
         const auto xvtrIt = m_radioModel.xvtrList().constFind(xvtrIdx);
         if (xvtrIt == m_radioModel.xvtrList().cend()) {
             return;
         }
-        const bool rxOnly = xvtrIt->rxOnly;
         const auto xvtrs = xvtrPolicyBandsFrom(m_radioModel.xvtrList());
-        for (auto* slice : m_radioModel.slices()) {
-            if (!slice || slice->panId() != panId) {
-                continue;
-            }
-            if (XvtrPolicy::transverterIndexForFrequency(slice->frequency(),
-                                                         xvtrs) != xvtrIdx) {
-                continue;
-            }
-            qCDebug(lcProtocol).noquote().nospace()
-                << "MainWindow: xvtr antenna auto-switch slice=" << slice->sliceId()
-                << " pan=" << panId
-                << " xvtr_idx=" << xvtrIdx
-                << " rxant=" << (rxAnt.isEmpty() ? QStringLiteral("(keep)") : rxAnt)
-                << " txant=" << (txAnt.isEmpty() ? QStringLiteral("(keep)") : txAnt)
-                << " rx_only=" << rxOnly;
-            if (!rxAnt.isEmpty() && slice->rxAntenna() != rxAnt) {
-                m_radioModel.sendCommand(QString("slice set %1 rxant=%2")
-                                             .arg(slice->sliceId()).arg(rxAnt));
-            }
-            if (!txAnt.isEmpty() && !rxOnly && slice->txAntenna() != txAnt) {
-                m_radioModel.sendCommand(QString("slice set %1 txant=%2")
-                                             .arg(slice->sliceId()).arg(txAnt));
-            }
+        if (XvtrPolicy::transverterIndexForFrequency(s->frequency(), xvtrs)
+                != xvtrIdx) {
+            return;
+        }
+        qCDebug(lcProtocol).noquote().nospace()
+            << "MainWindow: xvtr antenna auto-switch slice=" << s->sliceId()
+            << " xvtr_idx=" << xvtrIdx
+            << " rxant=" << (ports.rx.isEmpty() ? QStringLiteral("(keep)") : ports.rx)
+            << " txant=" << (ports.tx.isEmpty() ? QStringLiteral("(keep)") : ports.tx)
+            << " rx_only=" << xvtrIt->rxOnly;
+        if (!ports.rx.isEmpty() && s->rxAntenna() != ports.rx) {
+            m_radioModel.sendCommand(QString("slice set %1 rxant=%2")
+                                         .arg(s->sliceId()).arg(ports.rx));
+        }
+        if (!ports.tx.isEmpty() && !xvtrIt->rxOnly && s->txAntenna() != ports.tx) {
+            m_radioModel.sendCommand(QString("slice set %1 txant=%2")
+                                         .arg(s->sliceId()).arg(ports.tx));
         }
     });
 }
