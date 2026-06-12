@@ -48,6 +48,13 @@ BandStackKeyResult resolveBandStackKey(const QString& bandName,
                                        const QVector<Transverter>& xvtrs,
                                        ModelCapabilities caps = {});
 
+// Which transverter owns an RF frequency: the valid transverter whose RF
+// start is nearest at-or-below freqMhz, within the radio's IF tuning span.
+// Returns the transverter's status-object index, or -1 when the frequency
+// is not inside any transverter's RF window.
+int transverterIndexForFrequency(double freqMhz,
+                                 const QVector<Transverter>& xvtrs);
+
 bool isWaterfallTileOutsidePan(double lowMhz, double highMhz, double panCenterMhz);
 
 WaterfallTileMatch matchWaterfallTileTransverterOffset(double lowMhz, double highMhz,

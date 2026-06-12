@@ -6,6 +6,7 @@
 #include "models/RadioModel.h"
 #include "models/XvtrPolicy.h"
 #include "core/AppSettings.h"
+#include "core/XvtrAutoAntennaSettings.h"
 #include "core/LogManager.h"
 #include "core/PeripheralSettings.h"
 #include <QApplication>
@@ -2796,6 +2797,47 @@ QWidget* RadioSetupDialog::buildXvtrTab()
             if (tabIdx >= 0) xvtrTabs->removeTab(tabIdx);
         });
         grid->addWidget(removeBtn, 4, 3);
+
+        // Client-side antenna auto-switch (#3531): which ports to apply when
+        // a band change lands on this transverter. The radio does not persist
+        // per-XVTR antenna mappings, so they live in AppSettings (see
+        // XvtrAutoAntennaSettings.h). The default "(no change)" keeps the
+        // radio-authoritative behavior untouched.
+        auto addAutoAntCombo = [this, grid, idx](int row, int col,
+                                                 const QString& label,
+                                                 bool isRx) {
+            auto* lbl = new QLabel(label);
+            lbl->setStyleSheet(kLabelStyle);
+            grid->addWidget(lbl, row, col * 2);
+            auto* cmb = new QComboBox;
+            AetherSDR::applyComboStyle(cmb);
+            cmb->addItem(QStringLiteral("(no change)"));
+            const auto ports = AetherSDR::loadXvtrAutoAntennaPorts(idx);
+            const QString saved = isRx ? ports.rx : ports.tx;
+            QStringList ants = m_model->antennaList();
+            if (!saved.isEmpty() && !ants.contains(saved)) {
+                ants.append(saved);
+            }
+            cmb->addItems(ants);
+            cmb->setCurrentIndex(saved.isEmpty() ? 0 : cmb->findText(saved));
+            cmb->setToolTip("Antenna applied automatically when a band change "
+                            "lands on this transverter. \"(no change)\" leaves "
+                            "the radio's band-stack antenna untouched.");
+            connect(cmb, &QComboBox::currentIndexChanged, this,
+                    [cmb, idx, isRx](int i) {
+                auto ports = AetherSDR::loadXvtrAutoAntennaPorts(idx);
+                const QString port = i <= 0 ? QString() : cmb->currentText();
+                if (isRx) {
+                    ports.rx = port;
+                } else {
+                    ports.tx = port;
+                }
+                AetherSDR::saveXvtrAutoAntennaPorts(idx, ports);
+            });
+            grid->addWidget(cmb, row, col * 2 + 1);
+        };
+        addAutoAntCombo(5, 0, "Auto RX Ant:", true);
+        addAutoAntCombo(5, 1, "Auto TX Ant:", false);
 
         auto maxPowerRange = [this, ifEdit] {
             return XvtrPolicy::maxPowerRangeFor(ifEdit->text().toDouble(), m_model->model());

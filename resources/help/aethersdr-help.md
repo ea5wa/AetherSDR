@@ -427,7 +427,7 @@ SpotHub brings spot sources together in one place so you can compare cluster inf
 - `Phone/CW`: microphone, CW, and digital-specific setup
 - `RX`: frequency offset, 10 MHz reference, and receive-related global settings
 - `Filters`: filter behavior and low-latency digital choices
-- `XVTR`: transverter definitions and management
+- `XVTR`: transverter definitions and management. Each transverter page also offers `Auto RX Ant` / `Auto TX Ant` selectors: when set, changing to that transverter's band automatically switches the slice's RX/TX antenna to the chosen port. The default `(no change)` leaves antenna selection to the radio's band stack.
 - `USB Cables`: CAT, BCD, bit, and passthrough cable definitions
 - `Serial`: serial port behavior, pin assignments, and FlexControl tuning knob setup when serial support is built in
 

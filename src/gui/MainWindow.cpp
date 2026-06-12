@@ -202,6 +202,7 @@
 #include <QToolTip>
 #include <QMediaDevices>
 #include "core/AppSettings.h"
+#include "core/XvtrAutoAntennaSettings.h"
 #include "core/SpotCommandPolicy.h"
 #include "core/SpotModeResolver.h"
 #ifdef HAVE_RADE
@@ -7173,6 +7174,7 @@ bool MainWindow::activateMemorySpot(int memoryIndex, const QString& preferredPan
                 QTimer::singleShot(300, this, [this, slicePanId]() {
                     reassertUnmutedSliceAudioForPan(slicePanId);
                 });
+                applyXvtrAutoAntennas(slicePanId, stackKeyResult.key);
             } else {
                 qCWarning(lcProtocol).noquote().nospace()
                     << "MainWindow: memory recall cannot preselect band stack memory="
@@ -7382,7 +7384,71 @@ MainWindow::BandStackPreselectResult MainWindow::preselectBandStackForTune(
     QTimer::singleShot(300, this, [this, panId = slice->panId()]() {
         reassertUnmutedSliceAudioForPan(panId);
     });
+    applyXvtrAutoAntennas(slice->panId(), stackKeyResult.key);
     return BandStackPreselectResult::Selected;
+}
+
+void MainWindow::applyXvtrAutoAntennas(const QString& panId, const QString& stackKey)
+{
+    // Client-side antenna auto-switch (#3531). Only X<n> band-stack keys
+    // (transverter bands) participate; native bands stay radio-authoritative.
+    // The per-XVTR ports are configured in Radio Setup → XVTR and stored in
+    // AppSettings because the radio does not persist per-XVTR antenna
+    // mappings. Empty ports (the "(no change)" default) disable this.
+    if (panId.isEmpty() || !stackKey.startsWith('X')) {
+        return;
+    }
+    bool indexOk = false;
+    const int xvtrIdx = stackKey.mid(1).toInt(&indexOk);
+    if (!indexOk) {
+        return;
+    }
+
+    const auto ports = AetherSDR::loadXvtrAutoAntennaPorts(xvtrIdx);
+    if (!ports.isConfigured()) {
+        return;
+    }
+    const QString rxAnt = ports.rx;
+    const QString txAnt = ports.tx;
+
+    // A Flex band change (display pan set band=) tears down and recreates the
+    // slice; recreated slices settle in ~250-340 ms observed (see the deferred
+    // vfo push in TciServer::wireSlice). Defer, then verify the settled slice
+    // actually landed on this transverter before touching its antennas — if
+    // the band change failed or the user already jumped elsewhere, sending
+    // rxant/txant would key the wrong port.
+    QTimer::singleShot(600, this, [this, panId, xvtrIdx, rxAnt, txAnt]() {
+        const auto xvtrIt = m_radioModel.xvtrList().constFind(xvtrIdx);
+        if (xvtrIt == m_radioModel.xvtrList().cend()) {
+            return;
+        }
+        const bool rxOnly = xvtrIt->rxOnly;
+        const auto xvtrs = xvtrPolicyBandsFrom(m_radioModel.xvtrList());
+        for (auto* slice : m_radioModel.slices()) {
+            if (!slice || slice->panId() != panId) {
+                continue;
+            }
+            if (XvtrPolicy::transverterIndexForFrequency(slice->frequency(),
+                                                         xvtrs) != xvtrIdx) {
+                continue;
+            }
+            qCDebug(lcProtocol).noquote().nospace()
+                << "MainWindow: xvtr antenna auto-switch slice=" << slice->sliceId()
+                << " pan=" << panId
+                << " xvtr_idx=" << xvtrIdx
+                << " rxant=" << (rxAnt.isEmpty() ? QStringLiteral("(keep)") : rxAnt)
+                << " txant=" << (txAnt.isEmpty() ? QStringLiteral("(keep)") : txAnt)
+                << " rx_only=" << rxOnly;
+            if (!rxAnt.isEmpty() && slice->rxAntenna() != rxAnt) {
+                m_radioModel.sendCommand(QString("slice set %1 rxant=%2")
+                                             .arg(slice->sliceId()).arg(rxAnt));
+            }
+            if (!txAnt.isEmpty() && !rxOnly && slice->txAntenna() != txAnt) {
+                m_radioModel.sendCommand(QString("slice set %1 txant=%2")
+                                             .arg(slice->sliceId()).arg(txAnt));
+            }
+        }
+    });
 }
 
 void MainWindow::applyTuneRequest(SliceModel* slice, double mhz,

@@ -486,6 +486,7 @@ endif()
 # Sources
 set(CORE_SOURCES
     src/core/AppSettings.cpp
+    src/core/XvtrAutoAntennaSettings.cpp
     src/core/AgcTCalibrator.cpp
     src/core/SettingsHelpers.cpp
     src/core/ThemeManager.cpp

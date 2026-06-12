@@ -240,6 +240,7 @@ private:
     bool panFollowEnabled() const;
     BandStackPreselectResult preselectBandStackForTune(SliceModel* slice, double mhz,
                                                        const char* source);
+    void applyXvtrAutoAntennas(const QString& panId, const QString& stackKey);
     void applyTuneRequest(SliceModel* slice, double mhz,
                           TuneIntent intent, const char* source);
     void applyPanRangeRequest(const QString& panId, double centerMhz,

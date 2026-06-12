@@ -256,6 +256,36 @@ void testXvtrWaterfallGuardrails()
                 inRange, 144.125, 144.625, false);
 }
 
+void testTransverterIndexForFrequency()
+{
+    const QVector<XvtrPolicy::Transverter> xvtrs = {
+        xvtr(12, 3, "2m",    144.0, 28.0),
+        xvtr(4,  7, "70cm",  432.0, 28.0),
+        xvtr(1,  9, "1.2G", 1296.0, 28.0),
+        xvtr(6,  2, "23cm", 1240.0, 28.0, false),
+    };
+
+    auto expectIndex = [](const char* label, double freqMhz,
+                          const QVector<XvtrPolicy::Transverter>& xvtrs,
+                          int expected) {
+        const int idx = XvtrPolicy::transverterIndexForFrequency(freqMhz, xvtrs);
+        report(label, idx == expected,
+               QStringLiteral("idx=%1 expected=%2").arg(idx).arg(expected)
+                   .toStdString());
+    };
+
+    expectIndex("2m frequency resolves to 2m XVTR index", 144.2, xvtrs, 12);
+    expectIndex("RF window start is inclusive", 144.0, xvtrs, 12);
+    expectIndex("70cm frequency picks nearest RF start below", 432.1, xvtrs, 4);
+    expectIndex("1.2 GHz frequency resolves past lower XVTRs", 1296.3, xvtrs, 1);
+    expectIndex("invalid XVTR is never matched", 1241.0, xvtrs, -1);
+    expectIndex("HF frequency matches no XVTR", 14.225, xvtrs, -1);
+    expectIndex("frequency below every RF start matches nothing", 100.0, xvtrs, -1);
+    expectIndex("frequency beyond the 54 MHz IF span matches nothing",
+                432.1 + 60.0, xvtrs, -1);
+    expectIndex("empty XVTR list matches nothing", 144.2, {}, -1);
+}
+
 void testMaxPowerClampMirrorsFlexLib()
 {
     expectMaxPowerRange("6400 low IF caps max power at +10 dBm",
@@ -287,6 +317,7 @@ int main()
     testHfWaterfallDoesNotShiftWhenTileLagsByOneSpan();
     testXvtrWaterfallMapsIfToRfBands();
     testXvtrWaterfallGuardrails();
+    testTransverterIndexForFrequency();
     testMaxPowerClampMirrorsFlexLib();
 
     return g_failed == 0 ? 0 : 1;

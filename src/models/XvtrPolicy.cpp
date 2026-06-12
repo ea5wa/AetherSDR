@@ -94,6 +94,34 @@ BandStackKeyResult resolveBandStackKey(const QString& bandName,
     };
 }
 
+int transverterIndexForFrequency(double freqMhz,
+                                 const QVector<Transverter>& xvtrs)
+{
+    // The RF window of a transverter has no explicit width in the xvtr
+    // status object; the radio can tune at most its native 54 MHz span
+    // above the IF, so cap the window there. Overlapping windows (e.g. a
+    // 2 m and a 70 cm transverter) are resolved by picking the nearest
+    // RF start at-or-below the frequency.
+    constexpr double kMaxRfWindowMhz = 54.0;
+    constexpr double kEdgeEpsilonMhz = 1e-6;
+
+    int bestIndex = -1;
+    double bestRfStart = -1.0;
+    for (const auto& xvtr : xvtrs) {
+        if (!xvtr.isValid || xvtr.rfFreqMhz <= 0.0)
+            continue;
+        if (freqMhz < xvtr.rfFreqMhz - kEdgeEpsilonMhz)
+            continue;
+        if (freqMhz - xvtr.rfFreqMhz > kMaxRfWindowMhz)
+            continue;
+        if (xvtr.rfFreqMhz > bestRfStart) {
+            bestRfStart = xvtr.rfFreqMhz;
+            bestIndex = xvtr.index;
+        }
+    }
+    return bestIndex;
+}
+
 bool isWaterfallTileOutsidePan(double lowMhz, double highMhz, double panCenterMhz)
 {
     const double bw = tileBandwidth(lowMhz, highMhz);
