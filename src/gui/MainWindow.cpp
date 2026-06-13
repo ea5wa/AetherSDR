@@ -8230,23 +8230,22 @@ void MainWindow::activateWFM(int sliceId)
     if (!s) return;
 
     auto resolveAudioDevice = [this]() -> QString {
-        while (true) {
-            QString deviceId = WfmSettings::audioDeviceId().trimmed();
-            if (deviceId.isEmpty()) {
-                WfmDeviceDialog dlg(this);
-                if (dlg.exec() != QDialog::Accepted || dlg.selectedDeviceId().isEmpty())
-                    return {};   // user cancelled
-                deviceId = dlg.selectedDeviceId();
-                if (dlg.rememberChoice())
-                    WfmSettings::setAudioDeviceId(deviceId);
-            }
+        QString deviceId = WfmSettings::audioDeviceId().trimmed();
+        if (!deviceId.isEmpty())
             return deviceId;
-        }
+        WfmDeviceDialog dlg(this);
+        if (dlg.exec() != QDialog::Accepted || dlg.selectedDeviceId().isEmpty())
+            return {};   // user cancelled
+        deviceId = dlg.selectedDeviceId();
+        if (dlg.rememberChoice())
+            WfmSettings::setAudioDeviceId(deviceId);
+        return deviceId;
     };
 
     const QString audioDeviceId = resolveAudioDevice();
     if (audioDeviceId.isEmpty()) {
         m_wfmSliceId = -1;
+        reflectWfmButtons(false, sliceId);   // un-stick the button that triggered us
         return;
     }
 
@@ -8283,8 +8282,13 @@ void MainWindow::activateWFM(int sliceId)
         delete m_wfmDemod;
         m_wfmDemod = nullptr;
         m_wfmSliceId = -1;
+        reflectWfmButtons(false, sliceId);   // un-stick the button that triggered us
         return;
     }
+
+    // Demod is live — reflect the real state onto both UI surfaces so the
+    // surface that did NOT initiate (and any mode combo) tracks it too.
+    reflectWfmButtons(true, sliceId);
 
     // SkyRoof policy: Doppler rides the demodulator's NCO while the pan (and
     // the DAX IQ centre) stays put — each retune is phase-continuous, so the
@@ -8314,6 +8318,8 @@ void MainWindow::deactivateWFM()
 {
     if (m_wfmSliceId < 0) return;
 
+    const int deactivatedSliceId = m_wfmSliceId;
+
     disconnect(m_wfmFreqConn);
 
     if (m_wfmDemod) {
@@ -8329,6 +8335,22 @@ void MainWindow::deactivateWFM()
     m_wfmSliceId = -1;
     m_wfmPrevFilterLo = 0;
     m_wfmPrevFilterHi = 0;
+
+    reflectWfmButtons(false, deactivatedSliceId);
+}
+
+// Mirror the real demod state onto both per-slice WFM toggles. Each surface
+// self-gates on its own slice, so passing the affected sliceId is enough; the
+// setWfmActive() setters block their button's signal, so this never loops back
+// through the wfmActivated handlers.
+void MainWindow::reflectWfmButtons(bool on, int sliceId)
+{
+    if (auto* rx = m_appletPanel ? m_appletPanel->rxApplet() : nullptr)
+        rx->setWfmActive(on, sliceId);
+    if (auto* sw = spectrumForSlice(m_radioModel.slice(sliceId))) {
+        if (auto* vfo = sw->vfoWidget(sliceId))
+            vfo->setWfmActive(on, sliceId);
+    }
 }
 
 } // namespace AetherSDR

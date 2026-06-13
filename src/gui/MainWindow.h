@@ -999,6 +999,11 @@ private:
     QMetaObject::Connection m_wfmFreqConn;
     void activateWFM(int sliceId);
     void deactivateWFM();
+    // Push the real WFM demod state onto both UI surfaces (the slice's
+    // VfoWidget WFM button and the RxApplet WFM button) so they never lie
+    // about whether the demod is running, regardless of which surface (or a
+    // mode change) toggled it.
+    void reflectWfmButtons(bool on, int sliceId);
 
 #if defined(Q_OS_MAC) || defined(HAVE_PIPEWIRE)
     DaxBridge* m_daxBridge{nullptr};

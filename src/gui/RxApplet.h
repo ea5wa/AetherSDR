@@ -136,6 +136,13 @@ signals:
     void wfmActivated(bool on, int sliceId);
 
 public:
+    // Reflect the real WFM demodulator state (owned by MainWindow) back onto
+    // the WFM toggle button, WITHOUT re-emitting wfmActivated. Self-gated on
+    // this applet's slice so a state change on another slice is ignored.
+    // Keeps the RxApplet and VfoWidget WFM buttons from desyncing when the
+    // demod is toggled from the other surface or torn down by a mode change.
+    void setWfmActive(bool on, int sliceId);
+
     void setInitialStepSize(int hz);
 
     // Mode-aware filter width formatter, shared with VfoWidget so the two

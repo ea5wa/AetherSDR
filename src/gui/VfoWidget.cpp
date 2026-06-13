@@ -2335,6 +2335,13 @@ void VfoWidget::setAfGain(int pct)
     }
 }
 
+void VfoWidget::setWfmActive(bool on, int sliceId)
+{
+    if (!m_wfmBtn || !m_slice || m_slice->sliceId() != sliceId) return;
+    QSignalBlocker sb(m_wfmBtn);
+    m_wfmBtn->setChecked(on);
+}
+
 void VfoWidget::updatePosition(int vfoX, int specTop, FlagDir dir)
 {
     const int w = width();

@@ -497,10 +497,10 @@ void RxApplet::buildUI()
                 this, [this](int) {
             if (m_modeCombo->signalsBlocked()) return;
             QString mode = m_modeCombo->currentText();
-            if (mode == "WFM") {
-                emit wfmActivated(true, m_slice ? m_slice->sliceId() : -1);
-                return;
-            }
+            // Selecting a real radio mode tears down the WFM software-demod
+            // overlay if it was running on this slice. ("WFM" is never an
+            // entry in m_modeCombo — it has its own toggle button — so there
+            // is no "turn WFM on" branch here.)
             emit wfmActivated(false, m_slice ? m_slice->sliceId() : -1);
 #ifdef HAVE_RADE
             if (mode == "RADE") {
@@ -1368,6 +1368,13 @@ void RxApplet::setAfGain(int pct)
 {
     QSignalBlocker b(m_afSlider);
     m_afSlider->setValue(pct);
+}
+
+void RxApplet::setWfmActive(bool on, int sliceId)
+{
+    if (!m_wfmButton || !m_slice || m_slice->sliceId() != sliceId) return;
+    QSignalBlocker b(m_wfmButton);
+    m_wfmButton->setChecked(on);
 }
 
 // ─── Slice wiring ─────────────────────────────────────────────────────────────
