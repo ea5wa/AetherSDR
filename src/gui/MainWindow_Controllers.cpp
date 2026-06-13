@@ -51,6 +51,19 @@ namespace {
 
 constexpr int kTMate2DefaultOverlayDurationMs = 1500;
 
+QString formatTMate2PowerSmallText(float watts)
+{
+    // std::lround(NaN) is unspecified; clamp to 0 first, mirroring powerBars().
+    if (!std::isfinite(watts))
+        watts = 0.0f;
+    const int roundedWatts = std::clamp(static_cast<int>(std::lround(watts)), 0, 9999);
+    if (roundedWatts <= 999)
+        return QString::number(roundedWatts);
+
+    const int tenthsKw = std::clamp(static_cast<int>(std::lround(watts / 100.0f)), 10, 99);
+    return QStringLiteral("%1k%2").arg(tenthsKw / 10).arg(tenthsKw % 10);
+}
+
 QString tmate2EncoderDefaultAction(int encoderIndex)
 {
     switch (encoderIndex) {
@@ -526,6 +539,11 @@ QString MainWindow::tmate2OverlayName() const
     case TMate2Overlay::Speed:  return QStringLiteral("speed");
     case TMate2Overlay::Wpm:    return QStringLiteral("wpm");
     case TMate2Overlay::Rit:    return QStringLiteral("rit");
+    case TMate2Overlay::Xit:    return QStringLiteral("xit");
+    case TMate2Overlay::Shift:  return QStringLiteral("shift");
+    case TMate2Overlay::Agc:    return QStringLiteral("agc");
+    case TMate2Overlay::Apf:    return QStringLiteral("apf");
+    case TMate2Overlay::Text:   return QStringLiteral("text");
     case TMate2Overlay::None:   break;
     }
     return QString();
@@ -599,6 +617,28 @@ void MainWindow::triggerTMate2Overlay(TMate2Overlay overlay, int value)
         100, 10000);
     m_tmate2Overlay = overlay;
     m_tmate2OverlayValue = value;
+    m_tmate2OverlayText.clear();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    m_tmate2LastUserInteractionMs = now;
+    m_tmate2DisplayBlanked = false;
+    m_tmate2OverlayUntilMs = now + durationMs;
+    m_tmate2OverlayTimer.start(durationMs);
+    updateTMate2Display();
+    updateTMate2Indicators();
+    restartTMate2IdleTimer();
+}
+
+void MainWindow::triggerTMate2TextOverlay(const QString& text)
+{
+    if (!m_hidEncoder || !m_hidEncoder->isOpen() || !m_hidEncoder->isTMate2()) return;
+    auto& settings = AppSettings::instance();
+    const int durationMs = std::clamp(
+        settings.value("TMate2OverlayDurationMs",
+                       QString::number(kTMate2DefaultOverlayDurationMs)).toInt(),
+        100, 10000);
+    m_tmate2Overlay = TMate2Overlay::Text;
+    m_tmate2OverlayValue = 0;
+    m_tmate2OverlayText = text;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     m_tmate2LastUserInteractionMs = now;
     m_tmate2DisplayBlanked = false;
@@ -626,14 +666,64 @@ void MainWindow::updateTMate2Display()
 
     if (tmate2OverlayActive()) {
         const int32_t mainVal = m_tmate2OverlayValue;
-        QMetaObject::invokeMethod(m_hidEncoder, [this, mainVal] {
-            m_hidEncoder->setTMate2Display(static_cast<uint32_t>(std::abs(mainVal)), 0);
+        QString overlayText;
+        auto fixed3 = [](int value) {
+            return QStringLiteral("%1").arg(std::clamp(value, 0, 999), 3, 10,
+                                            QLatin1Char('0'));
+        };
+        switch (m_tmate2Overlay) {
+        case TMate2Overlay::Text:
+            overlayText = m_tmate2OverlayText;
+            break;
+        case TMate2Overlay::Volume:
+            overlayText = QStringLiteral("VOL %1").arg(fixed3(mainVal));
+            break;
+        case TMate2Overlay::Power:
+            overlayText = QStringLiteral("PWR %1").arg(fixed3(mainVal));
+            break;
+        case TMate2Overlay::Agc:
+            overlayText = QStringLiteral("AGC %1").arg(fixed3(mainVal));
+            break;
+        case TMate2Overlay::Apf:
+            overlayText = QStringLiteral("APF %1").arg(fixed3(mainVal));
+            break;
+        case TMate2Overlay::Wpm:
+            overlayText = QStringLiteral("WPM %1").arg(fixed3(mainVal));
+            break;
+        case TMate2Overlay::Rit:
+            overlayText = QStringLiteral("RIT %1")
+                .arg(mainVal, 5, 10, QLatin1Char(' '));
+            break;
+        case TMate2Overlay::Xit:
+            overlayText = QStringLiteral("XIT %1")
+                .arg(mainVal, 5, 10, QLatin1Char(' '));
+            break;
+        case TMate2Overlay::Speed:
+            // Tuning step in Hz. Max preset step is 10 kHz, so use the short
+            // "STP" label: "STP 10000" is exactly 9 chars and fits the main
+            // display ("STEP 10000" would be 10 and truncate to "STEP 1000").
+            overlayText = QStringLiteral("STP %1")
+                .arg(mainVal, 5, 10, QLatin1Char(' '));
+            break;
+        case TMate2Overlay::Shift:
+            // Groundwork: not yet triggered (no dispatcher raises Shift). Own
+            // label so it never inherits the STEP readout if it is wired later.
+            overlayText = QStringLiteral("SHFT %1")
+                .arg(mainVal, 4, 10, QLatin1Char(' '));
+            break;
+        case TMate2Overlay::None:
+            overlayText.clear();
+            break;
+        }
+        QMetaObject::invokeMethod(m_hidEncoder, [this, overlayText] {
+            m_hidEncoder->setTMate2OverlayDisplay(overlayText);
         });
         return;
     }
     if (m_tmate2Overlay != TMate2Overlay::None) {
         m_tmate2Overlay = TMate2Overlay::None;
         m_tmate2OverlayUntilMs = 0;
+        m_tmate2OverlayText.clear();
     }
 
     // Frequency: active slice in Hz, 0 if no slice.
@@ -650,12 +740,16 @@ void MainWindow::updateTMate2Display()
     const int dbm       = static_cast<int>(std::round(m_tmate2SmeterDbm));
     const uint32_t sVal = static_cast<uint32_t>(std::clamp(std::abs(dbm), 0, 999));
 
-    const uint32_t smallVal = m_radioModel.transmitModel().isTransmitting()
-        ? static_cast<uint32_t>(m_tmate2TxWatts + 0.5f)
-        : sVal;
+    if (m_radioModel.transmitModel().isTransmitting()) {
+        const QString powerText = formatTMate2PowerSmallText(m_tmate2TxWatts);
+        QMetaObject::invokeMethod(m_hidEncoder, [this, freqHz, powerText] {
+            m_hidEncoder->setTMate2DisplayText(freqHz, powerText);
+        });
+        return;
+    }
 
-    QMetaObject::invokeMethod(m_hidEncoder, [this, freqHz, smallVal] {
-        m_hidEncoder->setTMate2Display(freqHz, smallVal);
+    QMetaObject::invokeMethod(m_hidEncoder, [this, freqHz, sVal] {
+        m_hidEncoder->setTMate2Display(freqHz, sVal);
     });
 }
 
@@ -684,7 +778,17 @@ void MainWindow::updateTMate2Indicators()
     const bool rit    = s && s->ritOn();
     const bool xit    = s && s->xitOn();
     const float dbm   = m_tmate2SmeterDbm;
+    const float txPowerWatts = m_tmate2TxWatts;
+    const float txPowerFullScaleWatts =
+        (m_radioModel.hasAmplifier() && m_radioModel.ampOperate()) ? 2000.0f : 100.0f;
     auto& settings = AppSettings::instance();
+    // TMate 2 settings list the main tuning encoder first, then the two
+    // auxiliary encoders. The LCD labels those auxiliaries in the opposite
+    // physical order: settings Encoder 3 is printed E1, Encoder 2 is printed E2.
+    const QString lcdE1Action = settings.value(
+        QStringLiteral("TMate2EncoderAction2"), QStringLiteral("WheelXit")).toString();
+    const QString lcdE2Action = settings.value(
+        QStringLiteral("TMate2EncoderAction1"), QStringLiteral("WheelRit")).toString();
     const uint8_t r = static_cast<uint8_t>(settings.value(
         tx ? "TMate2TxBacklightR" : "TMate2BacklightR",
         tx ? "255" : "0").toInt());
@@ -703,9 +807,13 @@ void MainWindow::updateTMate2Indicators()
         });
         return;
     }
-    QMetaObject::invokeMethod(m_hidEncoder, [this, tx, mode, dbm, rit, xit, r, g, b] {
+    QMetaObject::invokeMethod(m_hidEncoder,
+        [this, tx, mode, dbm, rit, xit, r, g, b, lcdE1Action, lcdE2Action,
+         txPowerWatts, txPowerFullScaleWatts] {
         m_hidEncoder->setTMate2Backlight(r, g, b);
-        m_hidEncoder->setTMate2Indicators(tx, mode, dbm, rit, xit);
+        m_hidEncoder->setTMate2Indicators(tx, mode, dbm, rit, xit,
+                                          lcdE1Action, lcdE2Action,
+                                          txPowerWatts, txPowerFullScaleWatts);
     });
 }
 
@@ -745,25 +853,58 @@ void MainWindow::dispatchHidAction(const QString& actionName,
     } else if (actionName == "ClearXit") {
         if (auto* s = activeSlice()) s->setXit(s->xitOn(), 0);
     } else if (actionName == "ToggleMox") {
-        m_radioModel.setTransmit(!m_radioModel.transmitModel().isTransmitting());
+        const bool next = !m_radioModel.transmitModel().isTransmitting();
+        m_radioModel.setTransmit(next);
     } else if (actionName == "ToggleTune") {
-        if (m_radioModel.transmitModel().isTuning())
+        const bool next = !m_radioModel.transmitModel().isTuning();
+        if (!next)
             m_radioModel.transmitModel().stopTune();
         else
             m_radioModel.transmitModel().startTune();
+#ifdef HAVE_HIDAPI
+        triggerTMate2TextOverlay(next ? QStringLiteral("TUNE ON")
+                                      : QStringLiteral("TUNE OFF"));
+#endif
     } else if (actionName == "ToggleMute") {
-        if (m_audio) m_audio->setMuted(!m_audio->isMuted());
+        if (m_audio) {
+            const bool next = !m_audio->isMuted();
+            m_audio->setMuted(next);
+#ifdef HAVE_HIDAPI
+            triggerTMate2TextOverlay(next ? QStringLiteral("MUTE ON")
+                                          : QStringLiteral("MUTE OFF"));
+#endif
+        }
     } else if (actionName == "ToggleLock") {
-        if (auto* s = activeSlice()) s->setLocked(!s->isLocked());
+        if (auto* s = activeSlice()) {
+            const bool next = !s->isLocked();
+            s->setLocked(next);
+#ifdef HAVE_HIDAPI
+            updateTMate2Status();
+            triggerTMate2TextOverlay(next ? QStringLiteral("LOCK ON")
+                                          : QStringLiteral("LOCK OFF"));
+#endif
+        }
     } else if (actionName == "ToggleApf") {
-        if (auto* s = activeSlice()) s->setApf(!s->apfOn());
+        if (auto* s = activeSlice()) {
+            const bool next = !s->apfOn();
+            s->setApf(next);
+#ifdef HAVE_HIDAPI
+            triggerTMate2TextOverlay(next ? QStringLiteral("APF ON")
+                                          : QStringLiteral("APF OFF"));
+#endif
+        }
     } else if (actionName == "ToggleAgc") {
         if (auto* s = activeSlice()) {
             static const char* modes[] = {"off","slow","med","fast"};
             const QString cur = s->agcMode().toLower();
             int idx = 0;
             for (int i = 0; i < 4; ++i) if (cur == modes[i]) { idx = i; break; }
-            s->setAgcMode(modes[(idx + 1) % 4]);
+            const int nextIdx = (idx + 1) % 4;
+            s->setAgcMode(modes[nextIdx]);
+#ifdef HAVE_HIDAPI
+            static const char* labels[] = {"AGC OFF", "AGC SLO", "AGC MED", "AGC FST"};
+            triggerTMate2TextOverlay(QString::fromLatin1(labels[nextIdx]));
+#endif
         }
     } else if (actionName == "BandZoom") {
         auto* s = activeSlice();
@@ -1161,6 +1302,9 @@ void MainWindow::applyFlexControlWheelAction(const QString& actionId, int steps)
         if (auto* s = activeSlice()) {
             const int hz = std::clamp(s->xitFreq() + steps * 10, -9999, 9999);
             s->setXit(true, hz);
+#ifdef HAVE_HIDAPI
+            triggerTMate2Overlay(TMate2Overlay::Xit, hz);
+#endif
         }
     } else if (actionId == "WheelVolume" || actionId == "WheelMasterAf") {
         // Route to master volume to match SmartSDR behavior (#2921).
@@ -1192,11 +1336,21 @@ void MainWindow::applyFlexControlWheelAction(const QString& actionId, int steps)
         triggerTMate2Overlay(TMate2Overlay::Volume, next);
 #endif
     } else if (actionId == "WheelAgcT") {
-        if (auto* s = activeSlice())
-            s->setAgcThreshold(std::clamp(s->agcThreshold() + steps, 0, 100));
+        if (auto* s = activeSlice()) {
+            const int next = std::clamp(s->agcThreshold() + steps, 0, 100);
+            s->setAgcThreshold(next);
+#ifdef HAVE_HIDAPI
+            triggerTMate2Overlay(TMate2Overlay::Agc, next);
+#endif
+        }
     } else if (actionId == "WheelApf") {
-        if (auto* s = activeSlice())
-            s->setApfLevel(std::clamp(s->apfLevel() + steps, 0, 100));
+        if (auto* s = activeSlice()) {
+            const int next = std::clamp(s->apfLevel() + steps, 0, 100);
+            s->setApfLevel(next);
+#ifdef HAVE_HIDAPI
+            triggerTMate2Overlay(TMate2Overlay::Apf, next);
+#endif
+        }
     } else if (actionId == "NextSlice" || actionId == "PrevSlice") {
         const auto& slices = m_radioModel.slices();
         if (slices.size() <= 1) return;

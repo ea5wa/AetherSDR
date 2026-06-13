@@ -34,6 +34,11 @@
 #include "core/SerialPortController.h"
 #include "core/FlexControlManager.h"
 #endif
+#include "models/RadioSession.h"
+
+#include <memory>
+#include <vector>
+
 #ifdef HAVE_MIDI
 #include "core/MidiControlManager.h"
 #endif
@@ -220,6 +225,7 @@ private:
     void buildUI();
     void buildMenuBar();
     void applyDarkTheme();
+    void updateStatusBarMinimumWidth();
 
     // Audio thread helpers — invoke AudioEngine methods on the worker thread (#502)
     void audioStartRx();
@@ -276,6 +282,14 @@ private:
     // from the constructor, in original order, defined in its subject TU.
     void wireMeters();              // MainWindow_Wiring.cpp
     void wireSpotSubsystem();       // MainWindow_Spots.cpp
+    // RadioSession precursors (#3351 Phase 2c / #3445) — MainWindow_Session.cpp
+    void wireDiscovery();
+    void wireRadioModel();
+    void wirePanLifecycle();
+    void wireCatPorts();            // MainWindow_Session.cpp
+    void wireDaxIq();               // MainWindow_Session.cpp
+    void wirePooDooTiles();         // MainWindow_DspApplets.cpp
+    void wireDspApplets();          // MainWindow_DspApplets.cpp
     void wireExternalControllers(); // MainWindow_Controllers.cpp
     void wirePanadapter(PanadapterApplet* applet);
     void wirePanReconcilers(PanadapterApplet* applet, PanadapterModel* pan);
@@ -451,7 +465,16 @@ private:
 
     // Core objects
     RadioDiscovery    m_discovery;
-    RadioModel        m_radioModel;
+    // Radio sessions (#3445 Camp B / #3351). Each session owns the full
+    // per-radio aggregate; today there is exactly one. The vector sits at
+    // the old `RadioModel m_radioModel` member position so destruction
+    // order relative to the surrounding members is unchanged.
+    std::vector<std::unique_ptr<RadioSession>> m_sessions;
+    RadioSession*     m_session{nullptr};  // active session (m_sessions.front())
+    // Alias into the active session's model. Keeps the ~900 m_radioModel
+    // call sites across the MainWindow TUs source-compatible; new code
+    // should prefer m_session->radioModel().
+    RadioModel&       m_radioModel;
     DxccColorProvider m_dxccProvider;
     AudioEngine*      m_audio{nullptr};
     QThread*          m_audioThread{nullptr};
@@ -467,8 +490,9 @@ private:
     ClientPuduMonitor* m_finalMonitor{nullptr};
     BandSettings      m_bandSettings;
     // CAT ports: up to 8 unified ports (rigctld / TS-2000 / FlexCAT), one per slice.
-    static constexpr int kCatPorts = 8;
-    CatPort* m_catPorts[kCatPorts]{};
+    // CAT ports are owned by the active RadioSession (#3351 session v2).
+    static constexpr int kCatPorts = RadioSession::kCatPorts;
+    CatPort* catPort(int i) const { return m_session->catPort(i); }
 
     // Returns how many CAT ports should be visible in the UI given radio state.
     // 1 when no radio; maxSlicesForModel() when connected.
@@ -478,7 +502,8 @@ private:
     // One-time settings migration from the old dual-server key schema.
     void migrateCatSettings();
 #ifdef HAVE_WEBSOCKETS
-    TciServer*             m_tciServer{nullptr};
+    // TciServer is owned by the active RadioSession (#3351 session v2).
+    TciServer* tciServer() const { return m_session->tciServer(); }
     FreeDvReporterDialog*  m_freedvReporterDialog{nullptr};
 #endif
     SmartLinkClient   m_smartLink;
@@ -616,9 +641,10 @@ private:
     bool    m_rc28PttLatched{false};
     bool    m_hidFastTune{false};
     bool    m_hidFineTune{false};
-    enum class TMate2Overlay { None, Volume, Power, Speed, Wpm, Rit };
+    enum class TMate2Overlay { None, Volume, Power, Speed, Wpm, Rit, Xit, Shift, Agc, Apf, Text };
     TMate2Overlay m_tmate2Overlay{TMate2Overlay::None};
     int     m_tmate2OverlayValue{0};
+    QString m_tmate2OverlayText;
     qint64  m_tmate2OverlayUntilMs{0};
     qint64  m_tmate2LastUserInteractionMs{0};
     bool    m_tmate2DisplayBlanked{false};
@@ -635,6 +661,7 @@ private:
     void noteTMate2Interaction();
     void blankTMate2Display();
     void triggerTMate2Overlay(TMate2Overlay overlay, int value);
+    void triggerTMate2TextOverlay(const QString& text);
     void updateTMate2Display();
     void updateTMate2Status();
     void updateTMate2Indicators();
@@ -769,6 +796,7 @@ private:
     QLabel* m_txIndicator{nullptr};
     QLabel* m_gpsDateLabel{nullptr};
     QLabel* m_gpsTimeLabel{nullptr};
+    QWidget* m_statusBarContainer{nullptr};
 
     // Active slice tracking for multi-slice support
     int m_activeSliceId{-1};

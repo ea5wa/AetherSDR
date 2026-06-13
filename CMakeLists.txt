@@ -613,6 +613,7 @@ endif()
 
 set(MODEL_SOURCES
     src/models/RadioModel.cpp
+    src/models/RadioSession.cpp
     src/models/ModelCapabilities.cpp
     src/models/AntennaAliasStore.cpp
     src/models/SliceModel.cpp
@@ -639,7 +640,9 @@ set(GUI_SOURCES
     src/gui/MainWindow.cpp
     src/gui/MainWindowHelpers.cpp
     src/gui/MainWindow_Controllers.cpp
+    src/gui/MainWindow_DspApplets.cpp
     src/gui/MainWindow_Menus.cpp
+    src/gui/MainWindow_Session.cpp
     src/gui/MainWindow_Shortcuts.cpp
     src/gui/MainWindow_DigitalModes.cpp
     src/gui/MainWindow_Spots.cpp

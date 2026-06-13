@@ -52,6 +52,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <memory>
 #include <cmath>
 
 namespace AetherSDR {
@@ -1469,8 +1470,8 @@ void MainWindow::wirePanadapter(PanadapterApplet* applet)
         // Do not "normalise" these — collapsing the guards regresses Log4OM
         // behavior under lock or SWR sweep.
         if (tciSpot) {
-            if (m_tciServer && s && !s->isLocked() && !m_swrSweep.running)
-                m_tciServer->notifySpotClicked(spotIndex, s);
+            if (tciServer() && s && !s->isLocked() && !m_swrSweep.running)
+                tciServer()->notifySpotClicked(spotIndex, s);
         } else if (!isPassiveLocalSpotId(spotIndex)) {
             m_radioModel.sendCommand(
                 QString("spot trigger %1 pan=%2").arg(spotIndex).arg(applet->panId()));
@@ -2190,8 +2191,10 @@ void MainWindow::wireMeters()
         m_appletPanel->sMeterWidget()->setTxMeters(fwd, swr);
 #ifdef HAVE_HIDAPI
         m_tmate2TxWatts = fwd;
-        if (m_radioModel.transmitModel().isTransmitting())
+        if (m_radioModel.transmitModel().isTransmitting()) {
             updateTMate2Display();
+            updateTMate2Indicators();
+        }
 #endif
     });
     connect(&m_radioModel.meterModel(), &MeterModel::micMetersChanged,
@@ -2216,6 +2219,7 @@ void MainWindow::wireMeters()
             this, [this](bool present) {
         m_tgxlContainer->setVisible(present);
         m_tgxlSeparator->setVisible(present);
+        updateStatusBarMinimumWidth();
         // Auto-connect/disconnect direct TGXL connection for manual relay control (#469)
         if (present) {
             QString ip = m_radioModel.tunerModel().tgxlIp();
@@ -2304,6 +2308,13 @@ void MainWindow::wireMeters()
             else if (kvs.contains("state") && !kvs.value("state").startsWith("TRANSMIT"))
                 m_appletPanel->sMeterWidget()->setTransmitting(false);
             m_appletPanel->sMeterWidget()->setTxMeters(watts, swr);
+#ifdef HAVE_HIDAPI
+            m_tmate2TxWatts = watts;
+            if (m_radioModel.transmitModel().isTransmitting()) {
+                updateTMate2Display();
+                updateTMate2Indicators();
+            }
+#endif
         }
     });
     connect(&m_pgxlConn, &PgxlConnection::connected, this, [this]() {
@@ -2424,6 +2435,7 @@ void MainWindow::wireMeters()
         m_pgxlContainer->setVisible(present);
         m_pgxlSeparator->setVisible(present);
         m_appletPanel->setAmpVisible(present);
+        updateStatusBarMinimumWidth();
         if (present) {
             updatePgxlStyle();
             m_appletPanel->ampApplet()->setState(
@@ -2440,6 +2452,13 @@ void MainWindow::wireMeters()
         // path, so we just stop overriding it here).
         if (m_radioModel.hasAmplifier() && m_radioModel.ampOperate()) {
             m_appletPanel->sMeterWidget()->setTxMeters(fwdPwr, swr);
+#ifdef HAVE_HIDAPI
+            m_tmate2TxWatts = fwdPwr;
+            if (m_radioModel.transmitModel().isTransmitting()) {
+                updateTMate2Display();
+                updateTMate2Indicators();
+            }
+#endif
             static int ampDbg = 0;
             if (++ampDbg % 50 == 1)
                 qCDebug(lcTuner) << "AMP→SMeter: fwd=" << fwdPwr << "W swr=" << swr;
