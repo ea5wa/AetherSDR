@@ -10,7 +10,7 @@
 
 AetherSDR brings FlexRadio operation to Linux without Wine or virtual machines. Built from the ground up with Qt6 and C++20, it speaks the SmartSDR protocol natively and aims to replicate the full SmartSDR experience.
 
-**Current version: 26.6.2** — CalVer (`YY.M.patch[.hotfix]`). | [Download](https://github.com/aethersdr/AetherSDR/releases/latest) | [Discussions](https://github.com/aethersdr/AetherSDR/discussions) | [What's New](https://github.com/aethersdr/AetherSDR/releases)
+**Current version: 26.6.3** — CalVer (`YY.M.patch[.hotfix]`). | [Download](https://github.com/aethersdr/AetherSDR/releases/latest) | [Discussions](https://github.com/aethersdr/AetherSDR/discussions) | [What's New](https://github.com/aethersdr/AetherSDR/releases)
 
 > **Cross-platform downloads available:** Linux AppImage, macOS universal DMG, Windows installer and portable ZIP.
 > Linux is the primary supported platform. macOS and Windows builds are provided as a courtesy.
@@ -23,29 +23,18 @@ AetherSDR brings FlexRadio operation to Linux without Wine or virtual machines. 
 
 ## Highlights
 
-- **GPU-accelerated rendering** — QRhi waterfall + FFT spectrum on GPU (OpenGL/Metal/D3D11), 71% CPU reduction, heat map FFT display
-- **Multi-slice operation** — color-coded VFO overlays, independent TX assignment, diversity mode with ESC beamforming
-- **Multi-panadapter** — up to 8 pans (FLEX-6700) with 6 layout options, detachable pop-out windows, per-pan display controls, native VITA-49 waterfall tiles
-- **Full RX/TX controls** — filter presets, custom filter edges, AGC, DSP, EQ, mic/compression gauges, ATU, TUNE/MOX
-- **Aetherial Audio Channel Strip** — unified RX **and** TX DSP suite (gate, EQ, compressor, de-esser, tube, AetherVoice exciter, Freeverb on TX, plus brickwall limiter on TX / output trim on RX) with savable preset library and a wall-clock-accurate scope on each side
-- **Client-side noise reduction** — NR2 (spectral), RN2 (RNNoise neural), NR4 (libspecbleach), DFNR (DeepFilterNet3 neural), BNR (NVIDIA GPU AI denoiser), MNR (macOS MMSE-Wiener)
-- **AetherSweep** — in-panadapter SWR analyzer with log scale, threshold-band shading, interpolated bandwidth at SWR ≤ 1.5 / 2.0
-- **Network Diagnostics** — per-metric trend graphs, packet loss / RTT / jitter metrics, live log tail
-- **Memory channels + profiles** — memory bank with quick-recall, global / mic / TX profile management synced with the radio
-- **CW operator suite** — real-time Morse decoder with auto pitch/speed detection, keyboard + MIDI-mapped straight key and iambic paddles with full break-in / QSK respect, optional Apollo-era Quindar tones on PTT
-- **SpotHub** — DX Cluster, RBN, WSJT-X, POTA, and FreeDV Reporter spots with density badges, auto-mode switch, and auto-reconnect
-- **DAX virtual audio** — 4 RX + 1 TX channels for WSJT-X, fldigi, VARA, JS8Call (Linux PipeWire native / PulseAudio, macOS CoreAudio; Windows via TCI / external bridges)
-- **DAX IQ streaming** — raw I/Q to SDR apps at 24/48/96/192 kHz
-- **SmartLink remote operation** — Auth0 login, TLS command channel, WAN UDP streaming with credential persistence
-- **TCI server** — full TCI v2.0 protocol over WebSocket: CAT + audio + IQ + CW + spots in one connection
-- **CAT control** — 4-channel rigctld TCP + virtual serial ports, CW macros for contest loggers
-- **MIDI controller mapping** — Learn mode, 50+ parameters, named profiles
-- **FlexControl USB tuning knob** — auto-detect, acceleration, configurable buttons
-- **Serial PTT/CW keying** — USB-serial DTR/RTS for external keyers and foot switches
-- **FreeDV RADE** — AI-based digital voice codec with client-side neural encoder/decoder
-- **4o3a Tuner Genius XL** — relay control, autotune, 3x1 antenna switch, SWR/power gauges
-- **Multi-Flex** — independent operation alongside SmartSDR/Maestro with clickable dashboard
-- **Adaptive predistortion (APD)** — SmartSignal toggle and status display for FLEX-8000 series, including **External APD** sampler-port selection (firmware 4.2.18+) for training APD against an external linear amplifier's output
+- **GPU-accelerated spectrum & waterfall** — QRhi rendering on the GPU (OpenGL/Metal/D3D11), ~71% CPU reduction over CPU paint
+- **Multi-slice & multi-panadapter** — colour-coded VFO overlays, independent TX assignment, diversity/ESC beamforming; up to 8 detachable pans with native VITA-49 waterfall tiles
+- **Aetherial Audio Channel Strip** — a unified RX **and** TX DSP suite (gate, EQ, compressor, de-esser, tube, AetherVoice exciter, reverb, brickwall limiter) with a preset library and a per-side scope
+- **Six client-side noise-reduction engines** — NR2 (spectral), RN2 (RNNoise), NR4 (libspecbleach), DFNR (DeepFilterNet3), BNR (NVIDIA GPU AI), and MNR (macOS)
+- **DAX virtual audio + IQ** — 4 RX + 1 TX channels and raw I/Q at 24–192 kHz for WSJT-X / fldigi / VARA / JS8Call, plus a per-slice **WFM demodulator** for satellite data
+- **AetherModem packet radio** — KISS-over-TCP TNC, connected-mode AX.25 BBS, a personal mailbox, and an **APRS client** (station map, GPS beacon, messaging) with a Direwolf-derived VHF demodulator
+- **AetherSweep** — in-panadapter SWR analyzer with log scale, threshold-band shading, and interpolated bandwidth at SWR ≤ 1.5 / 2.0
+- **SpotHub** — DX Cluster, RBN, WSJT-X, POTA, and FreeDV Reporter spots with auto-mode switch
+- **CW operator suite** — real-time Morse decoder, MIDI/keyboard straight-key & iambic paddles with full QSK, optional Quindar tones
+- **FreeDV RADE** — AI digital-voice codec with a client-side neural encoder/decoder
+- **SmartLink remote + TCI v2.0 server** — Auth0/TLS WAN operation, and CAT + audio + IQ + CW + spots over a single TCI WebSocket
+- **Broad hardware control** — rigctld + virtual-serial CAT, MIDI mapping, the FlexControl knob, serial PTT/CW keying, and Multi-Flex operation alongside SmartSDR/Maestro
 
 ---
 
