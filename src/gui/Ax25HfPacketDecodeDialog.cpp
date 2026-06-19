@@ -3021,6 +3021,17 @@ void Ax25HfPacketDecodeDialog::buildAprsUi(QWidget* page, QVBoxLayout* pageLayou
         new QDoubleValidator(-180.0, 180.0, 6, m_aprsManualLon));
     m_aprsManualLon->setText(AprsSettings::manualLon());
     posRow->addWidget(m_aprsManualLon);
+
+    // Lat/lon is the persisted source of truth; derive the grid box from it on
+    // open so it round-trips instead of showing blank. Nothing extra is stored.
+    {
+        bool initLatOk = false, initLonOk = false;
+        const double initLat = m_aprsManualLat->text().toDouble(&initLatOk);
+        const double initLon = m_aprsManualLon->text().toDouble(&initLonOk);
+        if (initLatOk && initLonOk)
+            m_aprsManualGrid->setText(MaidenheadLocator::toMaidenhead(initLat, initLon));
+    }
+
     config->addLayout(posRow, 2, 0, 1, 7);
     pageLayout->addWidget(configFrame);
 
